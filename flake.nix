@@ -16,18 +16,20 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        gbrain-embed = pkgs.writeShellApplication {
-          name = "gbrain-embed";
-          runtimeInputs = [
-            pkgs.bun
-            pkgs.curl
-            pkgs.coreutils
-          ];
-          text = ''
-            exec ${pkgs.bun}/bin/bun ${./src}/cli.ts "$@"
-          '';
-        };
+        gbrain-embed = pkgs.callPackage ./package.nix { };
         default = gbrain-embed;
       });
+
+      # NixOS and nix-darwin modules; the option tree is
+      # `services.gbrain-embed.*` in both cases.
+      nixosModules = {
+        default = ./modules/nixos.nix;
+        gbrain-embed = ./modules/nixos.nix;
+      };
+
+      darwinModules = {
+        default = ./modules/darwin.nix;
+        gbrain-embed = ./modules/darwin.nix;
+      };
     };
 }

@@ -71,6 +71,10 @@ nix build .#gbrain-embed
 ./result/bin/gbrain-embed --help
 ```
 
+For a managed service, use the [NixOS or nix-darwin module](#nix-flake)
+instead; module consumers get `llama-server` from nixpkgs and a declarative
+`services.gbrain-embed` configuration.
+
 ### From source
 
 ```bash
@@ -173,13 +177,123 @@ bun test
 The tests use a fake upstream HTTP server; no model or `llama-server` is
 needed.
 
-## Consuming the flake
+## Nix flake
+
+The flake exports the package plus a NixOS module and a nix-darwin module. Both
+modules expose the same `services.gbrain-embed.*` options, render them to
+`/etc/gbrain-embed/config.json`, and run `gbrain-embed serve` under the platform
+service manager; `llama-server` comes from nixpkgs.
+
+### Package
 
 ```nix
-inputs.gbrain-embed.url = "github:<owner>/gbrain-embed";
-# in a module:
+inputs.gbrain-embed.url = "github:fmu/gbrain-embed";
+# ...
 inputs.gbrain-embed.packages.${system}.gbrain-embed
 ```
 
+or directly:
+
+```bash
+nix run github:fmu/gbrain-embed -- --help
+```
+
 The package is a `writeShellApplication` that runs `src/cli.ts` with Bun and
-puts `curl`/`coreutils` on `PATH` for the model installer.
+puts `curl`/`coreutils` on `PATH` for the model installer. It does not pin a
+`llama-server`; the modules wire the nixpkgs one in for you.
+
+### NixOS
+
+```nix
+{
+  inputs.gbrain-embed.url = "github:fmu/gbrain-embed";
+
+  outputs = { self, nixpkgs, gbrain-embed, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      modules = [
+        gbrain-embed.nixosModules.default
+        {
+          services.gbrain-embed.enable = true;
+          # optional:
+          # services.gbrain-embed.mode = "throughput";
+          # services.gbrain-embed.settings.modes.background.ttlSeconds = 600;
+        }
+      ];
+    };
+  };
+}
+```
+
+The module creates a `gbrain-embed` system user, keeps the model and state under
+`/var/lib/gbrain-embed`, writes `/etc/gbrain-embed/config.json`, and starts
+`gbrain-embed.service`. Install the 3.3 GB model once as the service user, then
+configure gbrain and backfill as yourself:
+
+```bash
+sudo -u gbrain-embed /run/current-system/sw/bin/gbrain-embed \
+  --config /etc/gbrain-embed/config.json model install
+gbrain-embed --config /etc/gbrain-embed/config.json setup
+```
+
+`setup` reuses the running service, so it does not need write access to the
+service user's state directory. To run the proxy as your own login user instead
+of the dedicated account, set `user = "you"; createUser = false;` — the
+home-based defaults then apply and `gbrain-embed setup` works without the split
+above.
+
+### nix-darwin
+
+```nix
+{
+  inputs.gbrain-embed.url = "github:fmu/gbrain-embed";
+  inputs.nix-darwin.url = "github:nix-darwin/nix-darwin";
+
+  outputs = { self, nix-darwin, gbrain-embed, ... }: {
+    darwinConfigurations.mac = nix-darwin.lib.darwinSystem {
+      modules = [
+        gbrain-embed.darwinModules.default
+        {
+          system.primaryUser = "you"; # required by nix-darwin for user agents
+          services.gbrain-embed.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+The module installs a launchd user agent (`org.nixos.gbrain-embed`), writes the
+same `/etc/gbrain-embed/config.json`, and keeps the model and state under your
+`$HOME` (the CLI defaults). Install the model and configure gbrain once:
+
+```bash
+gbrain-embed --config /etc/gbrain-embed/config.json model install
+gbrain-embed --config /etc/gbrain-embed/config.json setup
+```
+
+### Options
+
+Both modules share these options:
+
+| option | default | meaning |
+| --- | --- | --- |
+| `enable` | `false` | run the proxy as a system/launchd service |
+| `package` | built from this flake | package to run |
+| `installPackage` | `true` | add the package to `environment.systemPackages` |
+| `mode` | `"background"` | llama.cpp profile (`background` or `throughput`) |
+| `listenHost`, `listenPort` | `127.0.0.1`, `8082` | OpenAI-compatible endpoint |
+| `upstreamHost`, `upstreamPort` | `127.0.0.1`, `8083` | managed `llama-server` |
+| `llamaServer` | nixpkgs `llama-cpp` | `llama-server` executable |
+| `gbrainBin` | `null` | path to `gbrain`, used by `setup`/`model`, not `serve` |
+| `modelPath` | `null` | GGUF path; NixOS defaults to `dataDir/models/…` |
+| `stateDir` | `null` | mode/PID/log directory; NixOS defaults to `dataDir/state` |
+| `modelId`, `dimensions`, `nativeDimensions` | `qwen3-embedding-4b`, `1536`, `2560` | vector identity |
+| `settings` | `{}` | extra `config.json` keys, deep-merged (e.g. `modes`) |
+| `environment` | `{}` | extra service environment |
+| `configFile` | generated | rendered config passed with `--config` |
+
+NixOS-only: `user`, `group`, `createUser`, `dataDir` (defaults
+`gbrain-embed`, `gbrain-embed`, `true`, `/var/lib/gbrain-embed`).
+
+`gbrain` itself is not part of the flake; the proxy only shells out to it from
+the `setup` and `model` subcommands, never from `serve`.
