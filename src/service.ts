@@ -1,20 +1,43 @@
 /**
  * The loopback OpenAI-compatible endpoint gbrain talks to.
  *
- * It owns two things gbrain's `llama-server` recipe cannot: starting the model
- * server on the first embedding request, and stopping it after an idle window.
- * It also fits Qwen3-Embedding's 2560-wide output to the brain's 1536-wide
- * column by taking the Matryoshka prefix and renormalizing.
+ * It fronts two managed `llama-server` children and owns the lifecycle gbrain's
+ * `llama-server` recipes cannot: start each server on the first request that
+ * needs it, and stop it after its own idle window. The embedding and reranker
+ * children are independent — separate ports, idle clocks, logs and PID records
+ * — so an idle reranker unloads without touching a busy embedder (and vice
+ * versa), and an embedding `mode` switch never stops the reranker.
+ *
+ * Embeddings are fitted to the brain's vector width with the Matryoshka prefix
+ * and a renormalization; rerank requests are proxied to llama.cpp's
+ * `POST /v1/rerank` (`{results: [{index, relevance_score}]}`), which is exactly
+ * what the `llama-server-reranker` gbrain recipe expects.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { EmbedConfig, Mode } from "./config.ts";
-import { isMode, modeStatePath, upstreamBase } from "./config.ts";
+import { isMode, modeStatePath, rerankerBase, upstreamBase } from "./config.ts";
 import { encodeEmbeddingBase64, truncateAndNormalize } from "./truncate.ts";
 import type { UpstreamLike, UpstreamStatus } from "./upstream.ts";
+
+/** One model child plus the idle bookkeeping the supervisor keeps for it. */
+export interface ModelStatus {
+  upstream: UpstreamStatus;
+  lastRequestAt: number | null;
+  idleTtlMs: number;
+  modelPath: string;
+  modelId: string;
+  upstreamPort: number;
+  rssBytes: number | null;
+}
+
+export interface RerankerStatus extends ModelStatus {
+  enabled: boolean;
+}
 
 export interface ServiceStatus {
   ok: true;
   mode: Mode;
+  /** The embedding child (kept at this key for older `/health` consumers). */
   upstream: UpstreamStatus;
   lastRequestAt: number | null;
   idleTtlMs: number;
@@ -25,7 +48,11 @@ export interface ServiceStatus {
   listenPort: number;
   upstreamPort: number;
   rssBytes: number | null;
+  /** The reranker child, with its own independent idle TTL. */
+  reranker: RerankerStatus;
 }
+
+export type UnloadTarget = "embedding" | "reranker" | "all";
 
 interface JsonErrorBody {
   error: { message: string; type: string; code?: string };
@@ -40,6 +67,10 @@ function json(body: unknown, status = 200): Response {
 
 function errorBody(message: string, type: string): JsonErrorBody {
   return { error: { message, type } };
+}
+
+function isUnloadTarget(value: unknown): value is UnloadTarget {
+  return value === "embedding" || value === "reranker" || value === "all";
 }
 
 export function readMode(cfg: EmbedConfig): Mode {
@@ -60,27 +91,46 @@ export function writeMode(cfg: EmbedConfig, mode: Mode): void {
   writeFileSync(modeStatePath(cfg), `${mode}\n`, { mode: 0o600 });
 }
 
+function rssOf(upstream: UpstreamLike): number | null {
+  return typeof (upstream as { rssBytes?: () => number | null }).rssBytes === "function"
+    ? (upstream as { rssBytes: () => number | null }).rssBytes()
+    : null;
+}
+
+function recoverOrphan(upstream: UpstreamLike): void {
+  if (typeof (upstream as { recoverOrphan?: () => void }).recoverOrphan === "function") {
+    (upstream as { recoverOrphan: () => void }).recoverOrphan();
+  }
+}
+
 export class EmbedService {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private idleTimer: ReturnType<typeof setInterval> | null = null;
   private mode: Mode;
-  private lastRequestAt: number | null = null;
+  private lastEmbeddingRequestAt: number | null = null;
+  private lastRerankRequestAt: number | null = null;
   private reaping = false;
-  private startPromise: Promise<void> | null = null;
+  /** Requests currently talking to a child; the idle reaper must never unload one mid-flight. */
+  private inFlight = { embedding: 0, reranker: 0 };
+  /** A mode switch arrived while an embedding request was in flight. */
+  private pendingEmbeddingStop = false;
+  private embeddingStart: Promise<void> | null = null;
+  private rerankerStart: Promise<void> | null = null;
 
   constructor(
     private readonly cfg: EmbedConfig,
-    private readonly upstream: UpstreamLike,
+    private readonly embedding: UpstreamLike,
+    private readonly reranker: UpstreamLike,
   ) {
     this.mode = readMode(cfg);
   }
 
   start(): ReturnType<typeof Bun.serve> {
     if (this.server) return this.server;
-    this.upstream.status();
-    if (typeof (this.upstream as { recoverOrphan?: () => void }).recoverOrphan === "function") {
-      (this.upstream as { recoverOrphan: () => void }).recoverOrphan();
-    }
+    this.embedding.status();
+    this.reranker.status();
+    recoverOrphan(this.embedding);
+    recoverOrphan(this.reranker);
     this.server = Bun.serve({
       hostname: this.cfg.listenHost,
       port: this.cfg.listenPort,
@@ -109,20 +159,17 @@ export class EmbedService {
       this.server.stop(true);
       this.server = null;
     }
-    await this.upstream.stop();
+    await Promise.all([this.embedding.stop(), this.reranker.stop()]);
   }
 
   status(): ServiceStatus {
-    const upstream = this.upstream.status();
-    const rssBytes =
-      typeof (this.upstream as { rssBytes?: () => number | null }).rssBytes === "function"
-        ? (this.upstream as { rssBytes: () => number | null }).rssBytes()
-        : null;
+    const embedding = this.embedding.status();
+    const reranker = this.reranker.status();
     return {
       ok: true,
       mode: this.mode,
-      upstream,
-      lastRequestAt: this.lastRequestAt,
+      upstream: embedding,
+      lastRequestAt: this.lastEmbeddingRequestAt,
       idleTtlMs: this.cfg.modes[this.mode].ttlSeconds * 1000,
       modelPath: this.cfg.modelPath,
       modelId: this.cfg.modelId,
@@ -130,40 +177,126 @@ export class EmbedService {
       nativeDimensions: this.cfg.nativeDimensions,
       listenPort: this.port,
       upstreamPort: this.cfg.upstreamPort,
-      rssBytes,
+      rssBytes: rssOf(this.embedding),
+      reranker: {
+        enabled: this.cfg.reranker.enabled,
+        upstream: reranker,
+        lastRequestAt: this.lastRerankRequestAt,
+        idleTtlMs: this.cfg.reranker.ttlSeconds * 1000,
+        modelPath: this.cfg.reranker.modelPath,
+        modelId: this.cfg.reranker.modelId,
+        upstreamPort: this.cfg.reranker.upstreamPort,
+        rssBytes: rssOf(this.reranker),
+      },
     };
   }
 
+  /**
+   * Switch the embedding resource profile. The embedding child is stopped so
+   * the next embedding request starts it with the new flags; the reranker is
+   * deliberately left alone because its profile does not depend on the mode.
+   */
   async setMode(mode: Mode): Promise<void> {
     writeMode(this.cfg, mode);
     this.mode = mode;
-    if (this.upstream.isRunning()) await this.upstream.stop();
+    // Do not yank the child out from under an in-flight request; stop it as
+    // soon as that request finishes. A child that is still cold-starting has
+    // already captured the old mode, so it is stopped after the request too.
+    // The reranker is untouched either way.
+    const state = this.embedding.status().state;
+    if (state === "running" && this.inFlight.embedding === 0) {
+      await this.embedding.stop();
+    } else if (state !== "stopped") {
+      this.pendingEmbeddingStop = true;
+    }
+  }
+
+  /**
+   * Mark a request as in flight for one child. The idle reaper skips a child
+   * with a request in flight, which matters during a cold start: the model can
+   * take longer to load than the idle TTL, and unloading it then would kill
+   * the very request that woke it.
+   */
+  private async track<T>(kind: "embedding" | "reranker", fn: () => Promise<T>): Promise<T> {
+    this.inFlight[kind] += 1;
+    try {
+      return await fn();
+    } finally {
+      this.inFlight[kind] -= 1;
+      // Count idle time from completion, not from arrival.
+      if (kind === "embedding") this.lastEmbeddingRequestAt = Date.now();
+      else this.lastRerankRequestAt = Date.now();
+      if (kind === "embedding" && this.pendingEmbeddingStop && this.inFlight.embedding === 0) {
+        this.pendingEmbeddingStop = false;
+        await this.embedding.stop();
+      }
+    }
   }
 
   private async reap(): Promise<void> {
-    if (this.reaping || !this.upstream.isRunning()) return;
+    if (this.reaping) return;
     this.reaping = true;
     try {
-      const startedAt = this.upstream.status().startedAt ?? Date.now();
-      const since = this.lastRequestAt ?? startedAt;
-      const ttlMs = this.cfg.modes[this.mode].ttlSeconds * 1000;
-      if (ttlMs >= 0 && Date.now() - since > ttlMs) {
-        await this.upstream.stop();
+      if (this.inFlight.embedding === 0) {
+        await this.reapOne(
+          this.embedding,
+          this.lastEmbeddingRequestAt,
+          this.cfg.modes[this.mode].ttlSeconds,
+        );
+      }
+      if (this.cfg.reranker.enabled && this.inFlight.reranker === 0) {
+        await this.reapOne(this.reranker, this.lastRerankRequestAt, this.cfg.reranker.ttlSeconds);
       }
     } finally {
       this.reaping = false;
     }
   }
 
-  /** Concurrent cold requests share one spawn. */
-  private ensureUpstream(): Promise<void> {
-    if (this.upstream.isRunning()) return Promise.resolve();
-    if (!this.startPromise) {
-      this.startPromise = this.upstream.start(this.mode).finally(() => {
-        this.startPromise = null;
+  private async reapOne(
+    upstream: UpstreamLike,
+    lastRequestAt: number | null,
+    ttlSeconds: number,
+  ): Promise<void> {
+    if (!upstream.isRunning()) return;
+    const startedAt = upstream.status().startedAt ?? Date.now();
+    const since = lastRequestAt ?? startedAt;
+    if (ttlSeconds >= 0 && Date.now() - since > ttlSeconds * 1000) {
+      await upstream.stop();
+    }
+  }
+
+  /** Concurrent cold embedding requests share one spawn. */
+  private ensureEmbedding(): Promise<void> {
+    if (this.embedding.isRunning()) return Promise.resolve();
+    if (!this.embeddingStart) {
+      this.embeddingStart = this.embedding.start(this.mode).finally(() => {
+        this.embeddingStart = null;
       });
     }
-    return this.startPromise;
+    return this.embeddingStart;
+  }
+
+  /** Concurrent cold rerank requests share one spawn, independently of the embedding child. */
+  private ensureReranker(): Promise<void> {
+    if (!this.cfg.reranker.enabled) {
+      return Promise.reject(new Error("the reranker is disabled in the config"));
+    }
+    if (this.reranker.isRunning()) return Promise.resolve();
+    if (!this.rerankerStart) {
+      this.rerankerStart = this.reranker.start(this.mode).finally(() => {
+        this.rerankerStart = null;
+      });
+    }
+    return this.rerankerStart;
+  }
+
+  private async unload(target: UnloadTarget): Promise<void> {
+    const embedding = target === "all" || target === "embedding";
+    const reranker = target === "all" || target === "reranker";
+    const stops: Promise<void>[] = [];
+    if (embedding) stops.push(this.embedding.stop());
+    if (reranker) stops.push(this.reranker.stop());
+    await Promise.all(stops);
   }
 
   private async handle(request: Request): Promise<Response> {
@@ -174,20 +307,29 @@ export class EmbedService {
         return json(this.status());
       }
       if (path === "/v1/models" && request.method === "GET") {
-        return json({
-          object: "list",
-          data: [
-            {
-              id: this.cfg.modelId,
-              object: "model",
-              created: 0,
-              owned_by: "gbrain-embed",
-            },
-          ],
-        });
+        const data = [
+          {
+            id: this.cfg.modelId,
+            object: "model",
+            created: 0,
+            owned_by: "gbrain-embed",
+          },
+        ];
+        if (this.cfg.reranker.enabled) {
+          data.push({
+            id: this.cfg.reranker.modelId,
+            object: "model",
+            created: 0,
+            owned_by: "gbrain-embed",
+          });
+        }
+        return json({ object: "list", data });
       }
       if (path === "/v1/embeddings" && request.method === "POST") {
         return await this.handleEmbeddings(request);
+      }
+      if ((path === "/v1/rerank" || path === "/rerank") && request.method === "POST") {
+        return await this.handleRerank(request);
       }
       if (path === "/admin/mode" && request.method === "POST") {
         const body = await this.readJson(request);
@@ -198,8 +340,34 @@ export class EmbedService {
         await this.setMode(mode);
         return json(this.status());
       }
+      if (path === "/admin/unload" && request.method === "POST") {
+        let target: UnloadTarget = "all";
+        const text = await request.text();
+        if (text.trim()) {
+          let body: unknown;
+          try {
+            body = JSON.parse(text);
+          } catch {
+            return json(errorBody("request body is not valid JSON", "invalid_request_error"), 400);
+          }
+          const requested = (body as { model?: unknown } | null)?.model;
+          if (requested !== undefined) {
+            if (!isUnloadTarget(requested)) {
+              return json(
+                errorBody('model must be "embedding", "reranker" or "all"', "invalid_request_error"),
+                400,
+              );
+            }
+            target = requested;
+          }
+        }
+        await this.unload(target);
+        return json(this.status());
+      }
       if (path === "/admin/restart" && request.method === "POST") {
-        await this.upstream.stop();
+        // Backwards-compatible alias for "drop both children"; the next
+        // request restarts the one it needs.
+        await this.unload("all");
         return json(this.status());
       }
       return json(errorBody(`no route for ${request.method} ${path}`, "invalid_request_error"), 404);
@@ -248,9 +416,18 @@ export class EmbedService {
     }
     const wantsBase64 = body.encoding_format === "base64";
 
-    this.lastRequestAt = Date.now();
+    this.lastEmbeddingRequestAt = Date.now();
+    return this.track("embedding", () => this.forwardEmbedding(body, count, dimensions, wantsBase64));
+  }
+
+  private async forwardEmbedding(
+    body: Record<string, unknown>,
+    count: number,
+    dimensions: number,
+    wantsBase64: boolean,
+  ): Promise<Response> {
     try {
-      await this.ensureUpstream();
+      await this.ensureEmbedding();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return json(errorBody(`embedding server unavailable: ${message}`, "upstream_unavailable"), 503);
@@ -267,7 +444,7 @@ export class EmbedService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.upstream.stop();
+      await this.embedding.stop();
       return json(errorBody(`embedding server request failed: ${message}`, "upstream_error"), 502);
     }
 
@@ -306,7 +483,75 @@ export class EmbedService {
       return json(errorBody(error instanceof Error ? error.message : String(error), "upstream_error"), 502);
     }
 
-    this.lastRequestAt = Date.now();
     return json(parsed);
+  }
+
+  private async handleRerank(request: Request): Promise<Response> {
+    if (!this.cfg.reranker.enabled) {
+      return json(
+        errorBody(
+          "the reranker is disabled; set `reranker.enabled` to true in the config",
+          "reranker_disabled",
+        ),
+        503,
+      );
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = (await this.readJson(request)) as Record<string, unknown>;
+    } catch (error) {
+      return json(errorBody(error instanceof Error ? error.message : String(error), "invalid_request_error"), 400);
+    }
+
+    const query = body.query;
+    const documents = body.documents;
+    if (typeof query !== "string" || query.length === 0) {
+      return json(errorBody("query must be a non-empty string", "invalid_request_error"), 400);
+    }
+    if (
+      !Array.isArray(documents) ||
+      documents.length === 0 ||
+      documents.some((document) => typeof document !== "string")
+    ) {
+      return json(
+        errorBody("documents must be a non-empty array of strings", "invalid_request_error"),
+        400,
+      );
+    }
+
+    this.lastRerankRequestAt = Date.now();
+    return this.track("reranker", () => this.forwardRerank(body));
+  }
+
+  private async forwardRerank(body: Record<string, unknown>): Promise<Response> {
+    try {
+      await this.ensureReranker();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json(errorBody(`reranker server unavailable: ${message}`, "upstream_unavailable"), 503);
+    }
+
+    // The proxy owns one reranker alias, so the request is pinned to it; the
+    // rest of the caller's body (query, documents, top_n, ...) is forwarded.
+    const forwarded = { ...body, model: this.cfg.reranker.modelId };
+    let response: Response;
+    try {
+      response = await fetch(`${rerankerBase(this.cfg)}/v1/rerank`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(forwarded),
+        signal: AbortSignal.timeout(this.cfg.requestTimeoutMs),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.reranker.stop();
+      return json(errorBody(`reranker request failed: ${message}`, "upstream_error"), 502);
+    }
+
+    const text = await response.text();
+    return new Response(text, {
+      status: response.status,
+      headers: { "content-type": response.headers.get("content-type") ?? "application/json" },
+    });
   }
 }

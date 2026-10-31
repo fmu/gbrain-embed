@@ -1,24 +1,32 @@
 /**
- * The `llama-server` child: spawn on demand, wait for `/health`, stop after
- * idle, and never leave an orphan behind.
+ * A managed `llama-server` child: spawn on demand, wait for `/health`, stop
+ * after idle, and never leave an orphan behind.
  *
- * The child is the only thing holding the model. Stopping it is therefore the
- * unload: weights, KV cache and Metal buffers all go back to the OS.
+ * There are two of them, one per model kind: the embedding server
+ * (`--embeddings`) and the reranker (`--reranking`). llama.cpp makes those
+ * launch flags mutually exclusive, so they are separate processes with
+ * separate ports, PID records, logs and idle state. That is also what makes
+ * their load/unload cycles independent: stopping one never touches the other.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EmbedConfig, Mode } from "./config.ts";
 import {
-  upstreamBase,
+  modelBase,
+  rerankerErrLogPath,
+  rerankerOutLogPath,
+  rerankerStatePath,
   upstreamErrLogPath,
   upstreamOutLogPath,
   upstreamStatePath,
 } from "./config.ts";
 
+export type UpstreamKind = "embedding" | "reranker";
 export type UpstreamState = "stopped" | "starting" | "running" | "stopping";
 
 export interface UpstreamStatus {
   state: UpstreamState;
+  kind: UpstreamKind;
   pid?: number;
   startedAt?: number;
   mode?: Mode;
@@ -35,6 +43,7 @@ interface ChildRecord {
   pid: number;
   startedAt: number;
   mode: Mode;
+  kind?: UpstreamKind;
   modelPath: string;
   port: number;
 }
@@ -43,7 +52,54 @@ const LOG_LIMIT_BYTES = 20 * 1024 * 1024;
 const STOP_GRACE_MS = 5_000;
 const ORPHAN_GRACE_MS = 2_000;
 
-export function buildLlamaArgs(cfg: EmbedConfig, mode: Mode): string[] {
+function pathsFor(cfg: EmbedConfig, kind: UpstreamKind): {
+  statePath: string;
+  outLogPath: string;
+  errLogPath: string;
+} {
+  return kind === "reranker"
+    ? {
+        statePath: rerankerStatePath(cfg),
+        outLogPath: rerankerOutLogPath(cfg),
+        errLogPath: rerankerErrLogPath(cfg),
+      }
+    : {
+        statePath: upstreamStatePath(cfg),
+        outLogPath: upstreamOutLogPath(cfg),
+        errLogPath: upstreamErrLogPath(cfg),
+      };
+}
+
+function modelPathFor(cfg: EmbedConfig, kind: UpstreamKind): string {
+  return kind === "reranker" ? cfg.reranker.modelPath : cfg.modelPath;
+}
+
+function modelIdFor(cfg: EmbedConfig, kind: UpstreamKind): string {
+  return kind === "reranker" ? cfg.reranker.modelId : cfg.modelId;
+}
+
+function portFor(cfg: EmbedConfig, kind: UpstreamKind): number {
+  return kind === "reranker" ? cfg.reranker.upstreamPort : cfg.upstreamPort;
+}
+
+/** Full llama.cpp argument vector for one model kind. */
+export function buildLlamaArgs(
+  cfg: EmbedConfig,
+  mode: Mode,
+  kind: UpstreamKind = "embedding",
+): string[] {
+  if (kind === "reranker") {
+    return [
+      "-m", cfg.reranker.modelPath,
+      "--alias", cfg.reranker.modelId,
+      "--reranking",
+      "--pooling", "rank",
+      ...cfg.reranker.llamaArgs,
+      "--host", cfg.upstreamHost,
+      "--port", String(cfg.reranker.upstreamPort),
+      "--no-webui",
+    ];
+  }
   return [
     "-m", cfg.modelPath,
     "--alias", cfg.modelId,
@@ -57,11 +113,15 @@ export function buildLlamaArgs(cfg: EmbedConfig, mode: Mode): string[] {
 }
 
 /** Does a `ps` command line describe the child this config owns? */
-export function commandLineMatches(command: string, cfg: EmbedConfig): boolean {
+export function commandLineMatches(
+  command: string,
+  cfg: EmbedConfig,
+  kind: UpstreamKind = "embedding",
+): boolean {
   return (
     command.includes("llama-server") &&
-    command.includes(cfg.modelPath) &&
-    command.includes(String(cfg.upstreamPort))
+    command.includes(modelPathFor(cfg, kind)) &&
+    command.includes(String(portFor(cfg, kind)))
   );
 }
 
@@ -130,11 +190,15 @@ export class Upstream implements UpstreamLike {
   private outSink: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
   private errSink: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
 
-  constructor(private readonly cfg: EmbedConfig) {}
+  constructor(
+    private readonly cfg: EmbedConfig,
+    private readonly kind: UpstreamKind = "embedding",
+  ) {}
 
   status(): UpstreamStatus {
     return {
       state: this.state,
+      kind: this.kind,
       ...(this.childPid !== null ? { pid: this.childPid } : {}),
       ...(this.startedAt !== null ? { startedAt: this.startedAt } : {}),
       ...(this.currentMode !== null ? { mode: this.currentMode } : {}),
@@ -155,10 +219,21 @@ export class Upstream implements UpstreamLike {
     return this.startPromise;
   }
 
+  private installHint(): string {
+    return this.kind === "reranker"
+      ? "run `gbrain-embed model install reranker`"
+      : "run `gbrain-embed model install`";
+  }
+
+  private label(): string {
+    return this.kind === "reranker" ? "reranker" : "embedding server";
+  }
+
   private async spawnAndWait(mode: Mode): Promise<void> {
-    if (!existsSync(this.cfg.modelPath)) {
+    const modelPath = modelPathFor(this.cfg, this.kind);
+    if (!existsSync(modelPath)) {
       throw new Error(
-        `model file is missing: ${this.cfg.modelPath}; run \`gbrain-embed model install\``,
+        `${this.label()} model file is missing: ${modelPath}; ${this.installHint()}`,
       );
     }
     if (!existsSync(this.cfg.llamaServer)) {
@@ -167,19 +242,22 @@ export class Upstream implements UpstreamLike {
       );
     }
     mkdirSync(this.cfg.stateDir, { recursive: true });
-    truncateIfLarge(upstreamOutLogPath(this.cfg));
-    truncateIfLarge(upstreamErrLogPath(this.cfg));
+    const paths = pathsFor(this.cfg, this.kind);
+    truncateIfLarge(paths.outLogPath);
+    truncateIfLarge(paths.errLogPath);
 
-    const args = buildLlamaArgs(this.cfg, mode);
-    const taskpolicy = this.cfg.modes[mode].taskpolicy && existsSync("/usr/sbin/taskpolicy");
+    const args = buildLlamaArgs(this.cfg, mode, this.kind);
+    const taskpolicy =
+      (this.kind === "reranker" ? this.cfg.reranker.taskpolicy : this.cfg.modes[mode].taskpolicy) &&
+      existsSync("/usr/sbin/taskpolicy");
     const cmd = taskpolicy
       ? ["/usr/sbin/taskpolicy", "-b", this.cfg.llamaServer, ...args]
       : [this.cfg.llamaServer, ...args];
 
     this.state = "starting";
     this.currentMode = mode;
-    this.outSink = Bun.file(upstreamOutLogPath(this.cfg)).writer();
-    this.errSink = Bun.file(upstreamErrLogPath(this.cfg)).writer();
+    this.outSink = Bun.file(paths.outLogPath).writer();
+    this.errSink = Bun.file(paths.errLogPath).writer();
     try {
       this.child = Bun.spawn({
         cmd,
@@ -210,7 +288,7 @@ export class Upstream implements UpstreamLike {
         this.removeRecord();
         if (code !== 0) {
           console.error(
-            `[gbrain-embed] llama-server exited with ${code}: ${readLogTail(upstreamErrLogPath(this.cfg))}`,
+            `[gbrain-embed] ${this.label()} exited with ${code}: ${readLogTail(paths.errLogPath)}`,
           );
         }
       })
@@ -229,11 +307,12 @@ export class Upstream implements UpstreamLike {
 
   private async waitForHealth(): Promise<void> {
     const deadline = Date.now() + this.cfg.startupTimeoutMs;
-    const healthUrl = `${upstreamBase(this.cfg)}/health`;
+    const healthUrl = `${modelBase(this.cfg, this.kind)}/health`;
+    const errLog = pathsFor(this.cfg, this.kind).errLogPath;
     while (Date.now() < deadline) {
       if (this.child === null) {
         throw new Error(
-          `llama-server exited during startup: ${readLogTail(upstreamErrLogPath(this.cfg))}`,
+          `${this.label()} exited during startup: ${readLogTail(errLog)}`,
         );
       }
       try {
@@ -245,8 +324,8 @@ export class Upstream implements UpstreamLike {
       await sleep(100);
     }
     throw new Error(
-      `llama-server did not become healthy within ${this.cfg.startupTimeoutMs} ms: ` +
-        readLogTail(upstreamErrLogPath(this.cfg)),
+      `${this.label()} did not become healthy within ${this.cfg.startupTimeoutMs} ms: ` +
+        readLogTail(errLog),
     );
   }
 
@@ -289,17 +368,27 @@ export class Upstream implements UpstreamLike {
   recoverOrphan(): void {
     const record = this.readRecord();
     if (!record) return;
-    if (record.modelPath !== this.cfg.modelPath || record.port !== this.cfg.upstreamPort) {
+    if (
+      record.modelPath !== modelPathFor(this.cfg, this.kind) ||
+      record.port !== portFor(this.cfg, this.kind)
+    ) {
       this.removeRecord();
       return;
     }
-    const result = Bun.spawnSync({
-      cmd: ["ps", "-p", String(record.pid), "-o", "command="],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const command = result.stdout.toString().trim();
-    if (!commandLineMatches(command, this.cfg)) {
+    let command: string;
+    try {
+      const result = Bun.spawnSync({
+        cmd: ["ps", "-p", String(record.pid), "-o", "command="],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      command = result.stdout.toString().trim();
+    } catch (error) {
+      // `ps` can be unavailable in a sandbox; never kill on an unverifiable identity.
+      console.error(`[gbrain-embed] could not verify orphan ${this.label()} pid ${record.pid}: ${String(error)}`);
+      return;
+    }
+    if (!commandLineMatches(command, this.cfg, this.kind)) {
       this.removeRecord();
       return;
     }
@@ -322,19 +411,24 @@ export class Upstream implements UpstreamLike {
       }
     }
     this.removeRecord();
-    console.error(`[gbrain-embed] stopped orphaned llama-server pid ${record.pid}`);
+    console.error(`[gbrain-embed] stopped orphaned ${this.label()} pid ${record.pid}`);
   }
 
   /** Resident set size of the child, in bytes, or null when stopped. */
   rssBytes(): number | null {
     if (this.childPid === null) return null;
-    const result = Bun.spawnSync({
-      cmd: ["ps", "-o", "rss=", "-p", String(this.childPid)],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const kb = Number(result.stdout.toString().trim());
-    return Number.isFinite(kb) && kb > 0 ? kb * 1024 : null;
+    try {
+      const result = Bun.spawnSync({
+        cmd: ["ps", "-o", "rss=", "-p", String(this.childPid)],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const kb = Number(result.stdout.toString().trim());
+      return Number.isFinite(kb) && kb > 0 ? kb * 1024 : null;
+    } catch {
+      // `/health` must keep answering even where `ps` is unavailable.
+      return null;
+    }
   }
 
   private pidAlive(pid: number): boolean {
@@ -352,19 +446,24 @@ export class Upstream implements UpstreamLike {
       pid: this.childPid,
       startedAt: this.startedAt,
       mode,
-      modelPath: this.cfg.modelPath,
-      port: this.cfg.upstreamPort,
+      kind: this.kind,
+      modelPath: modelPathFor(this.cfg, this.kind),
+      port: portFor(this.cfg, this.kind),
     };
     try {
-      writeFileSync(upstreamStatePath(this.cfg), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      writeFileSync(pathsFor(this.cfg, this.kind).statePath, `${JSON.stringify(record)}\n`, {
+        mode: 0o600,
+      });
     } catch (error) {
-      console.error(`[gbrain-embed] could not write ${upstreamStatePath(this.cfg)}: ${String(error)}`);
+      console.error(
+        `[gbrain-embed] could not write ${pathsFor(this.cfg, this.kind).statePath}: ${String(error)}`,
+      );
     }
   }
 
   private readRecord(): ChildRecord | null {
     try {
-      const path = upstreamStatePath(this.cfg);
+      const path = pathsFor(this.cfg, this.kind).statePath;
       if (!existsSync(path)) return null;
       const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ChildRecord>;
       if (
@@ -374,6 +473,10 @@ export class Upstream implements UpstreamLike {
       ) {
         return null;
       }
+      // Records written before the reranker existed have no `kind`; they can
+      // only be embedding children.
+      const kind = parsed.kind ?? "embedding";
+      if (kind !== this.kind) return null;
       return parsed as ChildRecord;
     } catch {
       return null;
@@ -382,7 +485,7 @@ export class Upstream implements UpstreamLike {
 
   private removeRecord(): void {
     try {
-      rmSync(upstreamStatePath(this.cfg), { force: true });
+      rmSync(pathsFor(this.cfg, this.kind).statePath, { force: true });
     } catch {
       /* best effort */
     }
@@ -401,7 +504,7 @@ export class Upstream implements UpstreamLike {
   }
 }
 
-/** Directory that holds the child's logs; exposed for docs/tests. */
+/** Directory that holds the children's logs; exposed for docs/tests. */
 export function upstreamLogDir(cfg: EmbedConfig): string {
   return join(cfg.stateDir);
 }

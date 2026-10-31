@@ -9,6 +9,19 @@
 let
   cfg = config.services.gbrain-embed;
 
+  # The reranker child has its own port, idle TTL and launch flags; it is not
+  # part of the embedding `mode` profiles. `null` means "omit it and let the
+  # CLI apply its own default".
+  rerankerConfig = lib.filterAttrs (_: value: value != null) {
+    enabled = cfg.rerankerEnable;
+    modelPath = cfg.rerankerModelPath;
+    modelId = cfg.rerankerModelId;
+    upstreamPort = cfg.rerankerUpstreamPort;
+    ttlSeconds = cfg.rerankerTtlSeconds;
+    taskpolicy = cfg.rerankerTaskpolicy;
+    llamaArgs = cfg.rerankerLlamaArgs;
+  };
+
   # Values that always come from a dedicated option. `null` means "omit it and
   # let the CLI apply its own default".
   baseConfig = {
@@ -23,6 +36,7 @@ let
     nativeDimensions = cfg.nativeDimensions;
     dimensions = cfg.dimensions;
     defaultMode = cfg.mode;
+    reranker = rerankerConfig;
     stateDir = cfg.stateDir;
   };
 
@@ -30,7 +44,7 @@ let
 in
 {
   options.services.gbrain-embed = {
-    enable = lib.mkEnableOption "the gbrain-embed on-demand embedding proxy";
+    enable = lib.mkEnableOption "the gbrain-embed on-demand embedding and reranking proxy";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -79,7 +93,67 @@ in
     upstreamPort = lib.mkOption {
       type = lib.types.port;
       default = 8083;
-      description = "Port the managed `llama-server` listens on.";
+      description = "Port the managed embedding `llama-server` listens on.";
+    };
+
+    rerankerEnable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Serve the reranker (`POST /v1/rerank`) and configure gbrain to use it.
+        When false the proxy only carries embeddings.
+      '';
+    };
+
+    rerankerUpstreamPort = lib.mkOption {
+      type = lib.types.port;
+      default = 8084;
+      description = ''
+        Port the managed reranker `llama-server` listens on. It must differ from
+        both `listenPort` and `upstreamPort`; the two children are separate
+        processes because llama.cpp makes `--reranking` and `--embeddings`
+        mutually exclusive.
+      '';
+    };
+
+    rerankerModelPath = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Path of the Qwen3-Reranker GGUF. When null, the CLI default is used
+        (`$HOME/.local/share/gbrain-embed/models/…`; NixOS overrides this).
+      '';
+    };
+
+    rerankerModelId = lib.mkOption {
+      type = lib.types.str;
+      default = "qwen3-reranker-0.6b";
+      description = "Reranker identifier reported by `/v1/models` and stored in gbrain's config.";
+    };
+
+    rerankerTtlSeconds = lib.mkOption {
+      type = lib.types.int;
+      default = 300;
+      description = ''
+        Seconds without a rerank request before the reranker server is stopped.
+        This idle clock is independent of the embedding `mode` TTLs.
+      '';
+    };
+
+    rerankerTaskpolicy = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Wrap the reranker child in `taskpolicy -b` (macOS background QoS).";
+    };
+
+    rerankerLlamaArgs = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      description = ''
+        Extra llama.cpp flags for the reranker child after the shared
+        `-m/--alias/--reranking/--pooling` set. When null the CLI default is
+        used (`-c 4096 -b 2048 -ub 2048 --parallel 1 -t 4 -fa on`).
+      '';
     };
 
     llamaServer = lib.mkOption {
@@ -106,7 +180,7 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Path of the Qwen3-Embedding GGUF. When null, the CLI default is used
+        Path of the Qwen3-Embedding GGUF (the embedding model). When null, the CLI default is used
         (`$HOME/.local/share/gbrain-embed/models/…`; NixOS overrides this).
       '';
     };
@@ -133,9 +207,9 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Directory for the mode marker, child PID record and llama-server logs.
-        When null, the CLI default is used (`$HOME/.local/state/gbrain-embed`;
-        NixOS overrides this).
+        Directory for the mode marker, the two child PID records and their
+        `llama-server` logs. When null, the CLI default is used
+        (`$HOME/.local/state/gbrain-embed`; NixOS overrides this).
       '';
     };
 
@@ -180,6 +254,14 @@ in
       {
         assertion = cfg.dimensions <= cfg.nativeDimensions;
         message = "services.gbrain-embed: dimensions must not exceed nativeDimensions.";
+      }
+      {
+        assertion = cfg.listenPort != cfg.rerankerUpstreamPort;
+        message = "services.gbrain-embed: listenPort and rerankerUpstreamPort must differ.";
+      }
+      {
+        assertion = cfg.upstreamPort != cfg.rerankerUpstreamPort;
+        message = "services.gbrain-embed: upstreamPort and rerankerUpstreamPort must differ.";
       }
     ];
   };

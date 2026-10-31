@@ -17,7 +17,7 @@ writeShellApplication {
     exec ${bun}/bin/bun ${./src}/cli.ts "$@"
   '';
   meta = {
-    description = "On-demand local embeddings for gbrain, served by llama.cpp";
+    description = "On-demand local embeddings and reranking for gbrain, served by llama.cpp";
     homepage = "https://github.com/fmu/gbrain-embed";
     mainProgram = "gbrain-embed";
     platforms = lib.platforms.unix;

@@ -1,41 +1,59 @@
 # gbrain-embed
 
-An on-demand local embedding service for [gbrain](https://github.com/garrytan/gbrain).
+An on-demand local embedding **and reranking** service for
+[gbrain](https://github.com/garrytan/gbrain).
 
-It is a small loopback proxy that speaks the OpenAI embeddings API. On the
-first embedding request it starts `llama-server` (llama.cpp) with a
-Qwen3-Embedding GGUF, waits for it to become healthy, forwards the batch, and
-stops the server again after an idle window. Process exit is the unload: the
-model's memory goes back to the OS.
+It is a small loopback proxy that speaks the OpenAI embeddings API and also
+serves `POST /v1/rerank` for gbrain's `llama-server-reranker` recipe. Two
+`llama-server` children sit behind it, one per model:
 
-Because gbrain's `llama-server` recipe has no model lifecycle of its own, this
-proxy is what makes a local embedder work "transparently": gbrain points at a
-stable URL, and the model is resident only while it is being used.
+- the embedding model (Qwen3-Embedding-4B GGUF), and
+- the reranker (Qwen3-Reranker-0.6B GGUF).
+
+Each child starts on the first request that needs it, and each has **its own
+idle TTL, port, PID record and log file**. Stopping one never touches the
+other, so an idle reranker unloads while an embedder stays resident (and vice
+versa), and switching the embedding resource profile does not restart the
+reranker. Process exit is the unload: the model's memory goes back to the OS.
+
+llama.cpp makes `--embeddings` and `--reranking` mutually exclusive at server
+launch, so the two-model design is also the only one that works: two
+`llama-server` processes, one endpoint.
 
 ## Features
 
-- **Lazy start / idle unload** — no model process at rest, no manual
-  `llama-server` command.
-- **Two resource profiles** — `background` (small context, few threads,
-  background QoS, short TTL) and `throughput` (large batches, more threads,
-  long TTL), switchable at runtime without changing the vector space.
+- **One endpoint, two models** — `/v1/embeddings` and `/v1/rerank` on
+  `127.0.0.1:8082`; `/v1/models` lists both ids; `/health` reports both
+  children.
+- **Independent lazy start / idle unload** — the embedding server follows the
+  active mode's TTL, the reranker has its own `reranker.ttlSeconds`; each is
+  loaded only while it is being used.
+- **Two embedding resource profiles** — `background` (small context, few
+  threads, background QoS, short TTL) and `throughput` (large batches, more
+  threads, long TTL), switchable at runtime without changing the vector space.
+  The profiles size the embedding server only; the reranker has a fixed
+  launch profile.
 - **Matryoshka fitting** — Qwen3-Embedding emits 2560 dimensions natively; the
   proxy can truncate to the configured width (e.g. 1536) and L2-renormalize,
   which keeps a pgvector HNSW index usable.
-- **Verified model install** — hardlinks the Ollama blob when present, or
-  downloads the GGUF from Hugging Face, and checks its SHA-256.
-- **Loopback only** — `127.0.0.1`, no auth, no egress.
+- **Verified model installs** — hardlinks the Ollama blob when present, or
+  downloads the GGUF from Hugging Face, and checks its SHA-256. The reranker
+  uses the llama.cpp maintainers' Q8_0 conversion, the only published artifact
+  that carries the classifier head (see [Reranker model](#reranker-model-and-quantization)).
+- **Loopback only** — `127.0.0.1`, no auth, no egress except the one-time
+  model download.
 
 ## Requirements
 
 - The [`gbrain`](https://github.com/garrytan/gbrain) CLI on `PATH`
   (`brew install gbrain` from the tap below)
 - [Bun](https://bun.sh/) ≥ 1.4 (the Homebrew tap and the Nix package install it)
-- `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp)
-  (`brew install llama.cpp`; the Homebrew tap installs it as a dependency)
-- A Qwen3-Embedding GGUF. The default is
-  `batiai/Qwen3-Embedding-4B-GGUF` Q6_K, which is also the bytes behind the
-  Ollama tag `batiai/qwen3-embedding:4b`.
+- `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) with
+  reranking support (`--reranking`, `POST /v1/rerank`; a current Homebrew
+  build or nixpkgs `llama-cpp` has it)
+- The model GGUFs (installed by `gbrain-embed model install`):
+  - embedding: `batiai/Qwen3-Embedding-4B-GGUF` Q6_K, ~3.3 GB
+  - reranker: `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` Q8_0, ~0.64 GB
 
 ## Installation
 
@@ -57,11 +75,14 @@ them.
 The formula registers a `brew services` agent for `gbrain-embed serve`:
 
 ```bash
-gbrain-embed model install      # 3.3 GB GGUF, SHA-256 verified
-gbrain-embed setup              # configure gbrain and backfill
+gbrain-embed model install      # both GGUFs, SHA-256 verified
+gbrain-embed setup              # configure gbrain (embeddings + reranker) and backfill
 brew services start gbrain-embed
 brew services info gbrain-embed
 ```
+
+`model install embedding` installs only the embedder and `model install
+reranker` only the reranker.
 
 The same tap also carries gbrain itself:
 
@@ -102,19 +123,51 @@ Write a config (or let the defaults apply):
   "dimensions": 1536,
   "listenPort": 8082,
   "upstreamPort": 8083,
-  "defaultMode": "background"
+  "defaultMode": "background",
+  "reranker": {
+    "enabled": true,
+    "modelPath": "/Users/you/.local/share/gbrain-embed/models/qwen3-reranker-0.6b-q8_0.gguf",
+    "modelId": "qwen3-reranker-0.6b",
+    "upstreamPort": 8084,
+    "ttlSeconds": 300,
+    "taskpolicy": true,
+    "llamaArgs": ["-c", "4096", "-b", "2048", "-ub", "2048", "--parallel", "1", "-t", "4", "-fa", "on"]
+  }
 }
 ```
 
 The service reads `~/.config/gbrain-embed/config.json` by default;
-`GBRAIN_EMBED_CONFIG` or `--config <path>` override it.
+`GBRAIN_EMBED_CONFIG` or `--config <path>` override it. Missing keys take the
+defaults above; a partial `reranker` object is merged over the reranker
+defaults. `listenPort`, `upstreamPort` and `reranker.upstreamPort` must all
+differ.
 
 ```bash
-gbrain-embed model install          # hardlink the Ollama blob or download the HF GGUF
+gbrain-embed model install          # both models
+gbrain-embed model install reranker # just the reranker
 gbrain-embed serve                  # the proxy; normally run by launchd/systemd
 gbrain-embed status
-gbrain-embed bench                  # cold start, warm texts/s, RSS
+gbrain-embed bench                  # both children: cold start, warm throughput, RSS
 ```
+
+## The two models are independent
+
+| | embedding | reranker |
+| --- | --- | --- |
+| upstream port (default) | `8083` | `8084` |
+| launch flags | `--embeddings --pooling last` | `--reranking --pooling rank` |
+| idle TTL | `background`/`throughput` profile (120 s / 1800 s) | `reranker.ttlSeconds` (300 s) |
+| state record | `<stateDir>/upstream.json` | `<stateDir>/reranker.json` |
+| log files | `llama-server.{out,err}.log` | `llama-reranker.{out,err}.log` |
+| started by | `POST /v1/embeddings` | `POST /v1/rerank` |
+| stopped by | embedding idle TTL, `mode` switch, `/admin/unload` | reranker idle TTL, `/admin/unload` |
+
+`gbrain-embed mode <background|throughput>` writes the mode and stops the
+embedding child so the next embedding request starts it with the new flags;
+the reranker keeps running. `POST /admin/unload` with
+`{"model":"embedding"|"reranker"|"all"}` targets one child explicitly.
+Cold-start requests are also safe: a model that takes longer to load than its
+idle TTL is not reaped mid-request.
 
 ## Configuring gbrain
 
@@ -130,8 +183,30 @@ It performs:
 1. `gbrain config set provider_base_urls.llama-server http://127.0.0.1:8082/v1`
 2. `gbrain embeddings enable --embedding-model llama-server:qwen3-embedding-4b --embedding-dimensions 1536`
 3. `gbrain config set embedding_query_prefix "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"`
-4. `gbrain embed --stale --catch-up`
-5. `gbrain doctor --only embeddings --json`
+4. `gbrain config set provider_base_urls.llama-server-reranker http://127.0.0.1:8082/v1`
+5. `gbrain config set search.reranker.model llama-server-reranker:qwen3-reranker-0.6b`
+6. `gbrain config set search.reranker.enabled true`
+7. `gbrain embed --stale --catch-up`
+8. `gbrain doctor --only embeddings --json`
+
+Steps 4–6 are skipped when `reranker.enabled` is false, in which case `setup`
+disables the reranker in gbrain instead. Both providers point at the same
+loopback endpoint; gbrain appends `/embeddings` or `/rerank` itself.
+
+The equivalent manual configuration for both models is:
+
+```bash
+gbrain config set provider_base_urls.llama-server http://127.0.0.1:8082/v1
+gbrain config set provider_base_urls.llama-server-reranker http://127.0.0.1:8082/v1
+gbrain config set search.reranker.model llama-server-reranker:qwen3-reranker-0.6b
+gbrain config set search.reranker.enabled true
+```
+
+In gbrain's default `balanced` and `tokenmax` search modes the reranker is on;
+`conservative` turns it off. `gbrain models doctor` probes the configured
+reranker (the first cold start can take a few seconds). The
+`llama-server-reranker` recipe is part of gbrain 0.60.x and later; an older
+`gbrain` will not know that provider id.
 
 If the brain's vector column is not the configured width, `setup` refuses and
 prints the `gbrain migrate embeddings` preview; a width change is a re-embed,
@@ -143,7 +218,8 @@ not a config edit.
 | --- | --- | --- |
 | llama.cpp | `-c 2048 -b 512 -ub 512 --parallel 1 -t 2 -fa on` | `-c 8192 -b 2048 -ub 2048 --parallel 2 -t 8 -fa on` |
 | scheduling | `taskpolicy -b` (macOS background QoS) | normal QoS |
-| idle TTL | 120 s | 1800 s |
+| embedding idle TTL | 120 s | 1800 s |
+| reranker | unaffected | unaffected |
 
 ```bash
 gbrain-embed mode throughput
@@ -151,32 +227,88 @@ gbrain-embed mode background
 ```
 
 The mode is persisted under `~/.local/state/gbrain-embed/`; switching stops the
-child so the next request starts the new profile.
+embedding child so the next embedding request starts the new profile. The
+reranker has its own `reranker.ttlSeconds` and launch flags and is not part of
+the mode profiles.
 
 ## CLI
 
 | command | purpose |
 | --- | --- |
 | `serve` | run the proxy (launchd/systemd runs this) |
-| `status [--json]` | mode, child state, last request, RSS |
-| `mode <background\|throughput>` | switch the resource profile |
-| `model install [--refresh] [--source <ollama:tag\|hf:repo/file\|path>]` | install and verify the GGUF |
-| `setup [--json]` | configure gbrain and backfill |
-| `bench [--mode <m>] [--texts N] [--json]` | measure cold start and warm throughput |
-| `restart` | restart the launchd agent (falls back to the proxy admin endpoint) |
+| `status [--json]` | mode, both child states, last requests, RSS |
+| `mode <background\|throughput>` | switch the embedding resource profile |
+| `model install [embedding\|reranker\|all] [--refresh] [--source <...>]` | install and verify the GGUFs |
+| `setup [--json]` | configure gbrain (embeddings and reranker) and backfill |
+| `bench [--model <embedding\|reranker\|all>] [--mode <m>] [--texts N] [--json]` | measure cold start, warm throughput and RSS |
+| `restart [--model <embedding\|reranker\|all>]` | restart the launchd agent (falls back to the proxy admin endpoint) |
 
-The `restart` command targets the launchd label `name.fmu.gbrain-embed`, the
-label used by the reference deployment. Change it in `src/cli.ts` if you use a
-different one; with the Homebrew tap use `brew services restart gbrain-embed`.
+`--source` accepts `ollama:<tag>`, `hf:<repo>/<file>` or a filesystem path, and
+requires a single model target (it is ambiguous for `all`). The `restart`
+command targets the launchd label `name.fmu.gbrain-embed`, the label used by
+the reference deployment. Change it in `src/cli.ts` if you use a different
+one; with the Homebrew tap use `brew services restart gbrain-embed`.
 
 ## HTTP surface
 
 - `POST /v1/embeddings` — OpenAI-compatible; `input` string or array,
   optional `dimensions` (defaults to the configured width).
-- `GET /v1/models` — static model listing; does not wake the model.
-- `GET /health` — mode, child state, RSS, last request.
-- `POST /admin/mode` — `{"mode":"background"|"throughput"}`.
-- `POST /admin/restart` — stop the child; the next request restarts it.
+- `POST /v1/rerank` (alias `POST /rerank`) — llama.cpp rerank shape:
+  `{"model": "...", "query": "...", "documents": ["..."], "top_n": 25}`.
+  The response is passed through from `llama-server`:
+  `{"results": [{"index": 0, "relevance_score": 0.99}, ...]}`. The request
+  starts the reranker on demand; `reranker.enabled=false` answers 503.
+- `GET /v1/models` — static listing of both model ids; does not wake either
+  model.
+- `GET /health` — mode, both child states, per-model idle TTLs and last
+  request times, RSS. The embedding fields (`upstream`, `lastRequestAt`,
+  `idleTtlMs`, `modelPath`, `modelId`, `dimensions`, `nativeDimensions`,
+  `rssBytes`) keep their original top-level names; the reranker is reported
+  under `reranker`.
+- `POST /admin/mode` — `{"mode":"background"|"throughput"}`; stops the
+  embedding child only.
+- `POST /admin/unload` — `{"model":"embedding"|"reranker"|"all"}` (default
+  `all`); drops the selected child so the next request restarts it.
+- `POST /admin/restart` — compatibility alias for unloading both children.
+
+## Reranker model and quantization
+
+The shipped reranker is the llama.cpp maintainers' Qwen3-Reranker-0.6B Q8_0
+conversion (`ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`, 639,153,184 bytes,
+SHA-256 `22c9979c…23429a48`). It is the only published artifact we could verify
+that contains the classifier tensor `cls.output.weight`; without that tensor
+llama-server loads the GGUF but returns degenerate (~1e-9) scores.
+
+We measured Q8_0 against locally re-quantized copies produced from that verified
+Q8_0 with `llama-quantize` (Q4_K_M, Q5_K_M, Q6_K) on BEIR SciFact, 60 queries
+with lexically confusable hard negatives, plus cold-start, warm latency and RSS.
+Full report: [`docs/reranker-benchmark.md`](docs/reranker-benchmark.md); the
+scripts that produced it are under [`bench/reranker/`](bench/reranker/).
+
+| variant | nDCG@5 | MRR@10 | warm 30 docs | RSS | file |
+| --- | --- | --- | --- | --- | --- |
+| **Q8_0 (shipped)** | 0.8871 | 0.8727 | 3.63 s | 1170 MiB | 610 MiB |
+| Q4_K_M (local requant) | 0.9033 | 0.8996 | 4.12 s | 911 MiB | 378 MiB |
+| Q5_K_M (local requant) | 0.8846 | 0.8699 | 4.67 s | 956 MiB | 424 MiB |
+| Q6_K (local requant) | 0.8866 | 0.8769 | 3.46 s | 1012 MiB | 472 MiB |
+
+Quality deltas are inside the 60-query sampling noise; on this Apple-silicon
+build the quantized variants buy disk and RSS but are not faster, and the
+published community quants are unusable (missing classifier head). So Q8_0 is
+the default, and quantization is an optional low-memory path: quantize locally
+from the verified Q8_0 file
+
+```bash
+llama-quantize --allow-requantize \
+  ~/.local/share/gbrain-embed/models/qwen3-reranker-0.6b-q8_0.gguf \
+  ~/.local/share/gbrain-embed/models/qwen3-reranker-0.6b-q4_k_m.gguf Q4_K_M
+```
+
+then point `reranker.modelPath` at the new file and restart the service.
+`model install`/`setup` deliberately only accept the pinned Q8_0 digest, so
+install/setup first and swap the file when using a custom quantization. Keep
+`cls.output.weight` in high precision if you produce your own file
+(`llama-quantize --tensor-type cls.output.weight=Q8_0 ...`).
 
 ## Development
 
@@ -184,8 +316,10 @@ different one; with the Homebrew tap use `brew services restart gbrain-embed`.
 bun test
 ```
 
-The tests use a fake upstream HTTP server; no model or `llama-server` is
-needed.
+The tests use fake upstream HTTP servers and fake children; no model or
+`llama-server` is needed. For a real smoke test, point a throwaway config at
+the GGUFs, run `gbrain-embed serve`, and check `/health`, `/v1/models`,
+`/v1/embeddings` and `/v1/rerank`.
 
 ## Nix flake
 
@@ -227,6 +361,8 @@ puts `curl`/`coreutils` on `PATH` for the model installer. It does not pin a
           # optional:
           # services.gbrain-embed.mode = "throughput";
           # services.gbrain-embed.settings.modes.background.ttlSeconds = 600;
+          # services.gbrain-embed.rerankerTtlSeconds = 600;
+          # services.gbrain-embed.rerankerEnable = false;
         }
       ];
     };
@@ -234,10 +370,10 @@ puts `curl`/`coreutils` on `PATH` for the model installer. It does not pin a
 }
 ```
 
-The module creates a `gbrain-embed` system user, keeps the model and state under
-`/var/lib/gbrain-embed`, writes `/etc/gbrain-embed/config.json`, and starts
-`gbrain-embed.service`. Install the 3.3 GB model once as the service user, then
-configure gbrain and backfill as yourself:
+The module creates a `gbrain-embed` system user, keeps the models and state
+under `/var/lib/gbrain-embed`, writes `/etc/gbrain-embed/config.json`, and
+starts `gbrain-embed.service`. Install the models once as the service user,
+then configure gbrain and backfill as yourself:
 
 ```bash
 sudo -u gbrain-embed /run/current-system/sw/bin/gbrain-embed \
@@ -273,8 +409,8 @@ above.
 ```
 
 The module installs a launchd user agent (`org.nixos.gbrain-embed`), writes the
-same `/etc/gbrain-embed/config.json`, and keeps the model and state under your
-`$HOME` (the CLI defaults). Install the model and configure gbrain once:
+same `/etc/gbrain-embed/config.json`, and keeps the models and state under your
+`$HOME` (the CLI defaults). Install the models and configure gbrain once:
 
 ```bash
 gbrain-embed --config /etc/gbrain-embed/config.json model install
@@ -290,14 +426,21 @@ Both modules share these options:
 | `enable` | `false` | run the proxy as a system/launchd service |
 | `package` | built from this flake | package to run |
 | `installPackage` | `true` | add the package to `environment.systemPackages` |
-| `mode` | `"background"` | llama.cpp profile (`background` or `throughput`) |
+| `mode` | `"background"` | embedding llama.cpp profile (`background` or `throughput`) |
 | `listenHost`, `listenPort` | `127.0.0.1`, `8082` | OpenAI-compatible endpoint |
-| `upstreamHost`, `upstreamPort` | `127.0.0.1`, `8083` | managed `llama-server` |
+| `upstreamHost`, `upstreamPort` | `127.0.0.1`, `8083` | managed embedding `llama-server` |
+| `rerankerEnable` | `true` | serve and configure the reranker |
+| `rerankerUpstreamPort` | `8084` | managed reranker `llama-server` |
+| `rerankerModelPath` | `null` | reranker GGUF path; NixOS defaults to `dataDir/models/…` |
+| `rerankerModelId` | `"qwen3-reranker-0.6b"` | reranker id reported by `/v1/models` |
+| `rerankerTtlSeconds` | `300` | independent reranker idle TTL |
+| `rerankerTaskpolicy` | `true` | wrap the reranker in `taskpolicy -b` |
+| `rerankerLlamaArgs` | `null` | extra reranker llama.cpp flags |
 | `llamaServer` | nixpkgs `llama-cpp` | `llama-server` executable |
 | `gbrainBin` | `null` | path to `gbrain`, used by `setup`/`model`, not `serve` |
-| `modelPath` | `null` | GGUF path; NixOS defaults to `dataDir/models/…` |
+| `modelPath` | `null` | embedding GGUF path; NixOS defaults to `dataDir/models/…` |
 | `stateDir` | `null` | mode/PID/log directory; NixOS defaults to `dataDir/state` |
-| `modelId`, `dimensions`, `nativeDimensions` | `qwen3-embedding-4b`, `1536`, `2560` | vector identity |
+| `modelId`, `dimensions`, `nativeDimensions` | `qwen3-embedding-4b`, `1536`, `2560` | embedding vector identity |
 | `settings` | `{}` | extra `config.json` keys, deep-merged (e.g. `modes`) |
 | `environment` | `{}` | extra service environment |
 | `configFile` | generated | rendered config passed with `--config` |

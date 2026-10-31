@@ -1,5 +1,5 @@
 {
-  description = "On-demand Qwen3 embeddings for gbrain, served by llama.cpp";
+  description = "On-demand Qwen3 embeddings and reranking for gbrain, served by llama.cpp";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 

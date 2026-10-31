@@ -35,7 +35,7 @@ in
       type = lib.types.str;
       default = "/var/lib/gbrain-embed";
       description = ''
-        Writable state directory. It holds the verified GGUF by default and is
+        Writable state directory. It holds the verified GGUFs by default and is
         the service's working directory and `HOME`.
       '';
     };
@@ -45,6 +45,7 @@ in
     # Keep the model inside the service user's data directory instead of a
     # `$HOME/.local/share` that may not be meaningful for a system user.
     services.gbrain-embed.modelPath = lib.mkDefault "${cfg.dataDir}/models/qwen3-embedding-4b-q6_k.gguf";
+    services.gbrain-embed.rerankerModelPath = lib.mkDefault "${cfg.dataDir}/models/qwen3-reranker-0.6b-q8_0.gguf";
     services.gbrain-embed.stateDir = lib.mkDefault "${cfg.dataDir}/state";
 
     environment.etc."gbrain-embed/config.json".source = cfg.configFile;

@@ -6,17 +6,28 @@
  * is deliberately dependency-free beyond Bun and the Homebrew llama.cpp build.
  */
 import { loadConfig, listenBase, type EmbedConfig, type Mode } from "./config.ts";
-import { installModel, MODEL_SHA256 } from "./model.ts";
-import { EmbedService, readMode, writeMode } from "./service.ts";
-import { Upstream } from "./upstream.ts";
+import { installModel, modelDescriptors, type ModelKey } from "./model.ts";
+import { EmbedService, readMode, writeMode, type UnloadTarget } from "./service.ts";
+import { Upstream, type UpstreamStatus } from "./upstream.ts";
 
 const QUERY_PREFIX =
   "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:";
 
+interface RerankStatusView {
+  enabled: boolean;
+  upstream: UpstreamStatus;
+  lastRequestAt: number | null;
+  idleTtlMs: number;
+  modelPath: string;
+  modelId: string;
+  upstreamPort: number;
+  rssBytes: number | null;
+}
+
 interface Health {
   ok: true;
   mode: Mode;
-  upstream: { state: string; pid?: number; startedAt?: number; mode?: Mode };
+  upstream: UpstreamStatus;
   lastRequestAt: number | null;
   idleTtlMs: number;
   modelPath: string;
@@ -26,28 +37,39 @@ interface Health {
   listenPort: number;
   upstreamPort: number;
   rssBytes: number | null;
+  reranker?: RerankStatusView;
 }
 
+const MODEL_KEYS: ModelKey[] = ["embedding", "reranker"];
+
 function usage(): string {
-  return `gbrain-embed — on-demand Qwen3 embeddings for gbrain
+  const cfg = loadConfig();
+  return `gbrain-embed — on-demand Qwen3 embeddings and reranking for gbrain
 
 Usage:
   gbrain-embed serve                     Run the loopback proxy (launchd runs this)
-  gbrain-embed status [--json]           Show mode, child state, last request, RSS
+  gbrain-embed status [--json]           Show mode, child states, last requests, RSS
   gbrain-embed mode <background|throughput> [--json]
-                                         Switch the resource profile
-  gbrain-embed model install [--refresh] [--source <ollama:tag|hf:repo/file|path>] [--json]
-                                         Hardlink/download the verified Q6_K GGUF
-  gbrain-embed setup [--json]            Install the model, configure gbrain, backfill
-  gbrain-embed bench [--mode <m>] [--texts N] [--json]
-                                         Measure cold start and warm texts/s
-  gbrain-embed restart [--json]          Restart the launchd agent (or the proxy)
+                                         Switch the embedding resource profile
+  gbrain-embed model install [embedding|reranker|all] [--refresh] [--source <ollama:tag|hf:repo/file|path>] [--json]
+                                         Hardlink/download the verified GGUFs
+  gbrain-embed setup [--json]            Install the models, configure gbrain, backfill
+  gbrain-embed bench [--model <embedding|reranker|all>] [--mode <m>] [--texts N] [--json]
+                                         Measure cold start, warm throughput and RSS
+  gbrain-embed restart [--model <embedding|reranker|all>] [--json]
+                                         Restart the launchd agent (or drop a child)
 
 Global: --config <path>  (or GBRAIN_EMBED_CONFIG)
 
-Profiles:
-  background   ttl ${loadConfig().modes.background.ttlSeconds}s, ${loadConfig().modes.background.llamaArgs.join(" ")}, taskpolicy -b
-  throughput   ttl ${loadConfig().modes.throughput.ttlSeconds}s, ${loadConfig().modes.throughput.llamaArgs.join(" ")}, normal QoS
+Models:
+  embedding  ${cfg.modelId} at ${cfg.modelPath}
+             ttl ${cfg.modes[cfg.defaultMode].ttlSeconds}s in ${cfg.defaultMode} mode; upstream 127.0.0.1:${cfg.upstreamPort}
+  reranker   ${cfg.reranker.enabled ? cfg.reranker.modelId : "(disabled)"} at ${cfg.reranker.modelPath}
+             ttl ${cfg.reranker.ttlSeconds}s (independent of the embedding mode); upstream 127.0.0.1:${cfg.reranker.upstreamPort}
+
+Profiles (embedding only):
+  background   ttl ${cfg.modes.background.ttlSeconds}s, ${cfg.modes.background.llamaArgs.join(" ")}, taskpolicy -b
+  throughput   ttl ${cfg.modes.throughput.ttlSeconds}s, ${cfg.modes.throughput.llamaArgs.join(" ")}, normal QoS
 `;
 }
 
@@ -129,7 +151,7 @@ function captureGbrain(cfg: EmbedConfig, args: string[]): { code: number; out: s
 }
 
 async function commandServe(cfg: EmbedConfig): Promise<void> {
-  const service = new EmbedService(cfg, new Upstream(cfg));
+  const service = new EmbedService(cfg, new Upstream(cfg, "embedding"), new Upstream(cfg, "reranker"));
   try {
     service.start();
   } catch (error) {
@@ -139,7 +161,9 @@ async function commandServe(cfg: EmbedConfig): Promise<void> {
   }
   console.log(
     `[gbrain-embed] listening on ${listenBase(cfg)} (mode ${service.currentMode}, ` +
-      `upstream ${cfg.upstreamHost}:${cfg.upstreamPort}, ${cfg.dimensions}d)`,
+      `embedding ${cfg.upstreamHost}:${cfg.upstreamPort}, ` +
+      `reranker ${cfg.reranker.enabled ? `${cfg.upstreamHost}:${cfg.reranker.upstreamPort}` : "disabled"}, ` +
+      `${cfg.dimensions}d)`,
   );
   const shutdown = async (): Promise<void> => {
     console.log("[gbrain-embed] shutting down");
@@ -155,20 +179,36 @@ async function commandStatus(cfg: EmbedConfig, args: string[]): Promise<void> {
   const health = await fetchHealth(cfg);
   const json = has(args, "--json");
   if (!health) {
+    const mode = readMode(cfg);
     const body = {
       ok: false,
-      mode: readMode(cfg),
-      upstream: { state: "stopped" },
+      mode,
+      upstream: { state: "stopped", kind: "embedding" },
+      lastRequestAt: null,
+      idleTtlMs: cfg.modes[mode].ttlSeconds * 1000,
       modelPath: cfg.modelPath,
       modelId: cfg.modelId,
       dimensions: cfg.dimensions,
+      nativeDimensions: cfg.nativeDimensions,
       listenPort: cfg.listenPort,
       upstreamPort: cfg.upstreamPort,
+      rssBytes: null,
+      reranker: {
+        enabled: cfg.reranker.enabled,
+        upstream: { state: "stopped", kind: "reranker" },
+        lastRequestAt: null,
+        idleTtlMs: cfg.reranker.ttlSeconds * 1000,
+        modelPath: cfg.reranker.modelPath,
+        modelId: cfg.reranker.modelId,
+        upstreamPort: cfg.reranker.upstreamPort,
+        rssBytes: null,
+      },
     };
     if (json) printJson(body);
     else {
       console.log(`gbrain-embed: not running (${listenBase(cfg)})`);
-      console.log(`mode: ${body.mode}; model: ${cfg.modelId} (${cfg.dimensions}d)`);
+      console.log(`mode: ${body.mode}; embedding: ${cfg.modelId} (${cfg.dimensions}d)`);
+      console.log(`reranker: ${body.reranker.enabled ? cfg.reranker.modelId : "disabled"}`);
     }
     return;
   }
@@ -177,10 +217,26 @@ async function commandStatus(cfg: EmbedConfig, args: string[]): Promise<void> {
     return;
   }
   console.log(`gbrain-embed: running on ${listenBase(cfg)} (mode ${health.mode})`);
-  console.log(`upstream: ${health.upstream.state}${health.upstream.pid ? ` pid ${health.upstream.pid}` : ""}`);
-  console.log(`model: ${health.modelId} (${health.dimensions}d of ${health.nativeDimensions}) at ${health.modelPath}`);
-  console.log(`idle ttl: ${Math.round(health.idleTtlMs / 1000)}s; rss: ${humanBytes(health.rssBytes)}`);
-  console.log(`last request: ${health.lastRequestAt ? new Date(health.lastRequestAt).toISOString() : "never"}`);
+  console.log(
+    `embedding: ${health.upstream.state}${health.upstream.pid ? ` pid ${health.upstream.pid}` : ""}; ` +
+      `ttl ${Math.round(health.idleTtlMs / 1000)}s; rss ${humanBytes(health.rssBytes)}`,
+  );
+  console.log(`  model: ${health.modelId} (${health.dimensions}d of ${health.nativeDimensions}) at ${health.modelPath}`);
+  console.log(
+    `  last request: ${health.lastRequestAt ? new Date(health.lastRequestAt).toISOString() : "never"}`,
+  );
+  const reranker = health.reranker;
+  if (reranker) {
+    console.log(
+      `reranker: ${reranker.enabled ? reranker.upstream.state : "disabled"}` +
+        `${reranker.upstream.pid ? ` pid ${reranker.upstream.pid}` : ""}; ` +
+        `ttl ${Math.round(reranker.idleTtlMs / 1000)}s; rss ${humanBytes(reranker.rssBytes)}`,
+    );
+    console.log(`  model: ${reranker.modelId} at ${reranker.modelPath}`);
+    console.log(
+      `  last request: ${reranker.lastRequestAt ? new Date(reranker.lastRequestAt).toISOString() : "never"}`,
+    );
+  }
 }
 
 async function commandMode(cfg: EmbedConfig, args: string[]): Promise<void> {
@@ -198,7 +254,12 @@ async function commandMode(cfg: EmbedConfig, args: string[]): Promise<void> {
     if (!response.ok) throw new Error(await response.text());
     const health = (await response.json()) as Health;
     if (json) printJson(health);
-    else console.log(`mode: ${mode} (child ${health.upstream.state}; next request starts the new profile)`);
+    else {
+      console.log(
+        `mode: ${mode} (embedding child ${health.upstream.state}; next request starts the new profile; ` +
+          "the reranker is unaffected)",
+      );
+    }
   } catch (error) {
     if (json) printJson({ mode, applied: false, reason: error instanceof Error ? error.message : String(error) });
     else console.log(`mode written: ${mode}; the proxy is not running, so it applies on next start`);
@@ -206,34 +267,54 @@ async function commandMode(cfg: EmbedConfig, args: string[]): Promise<void> {
 }
 
 async function commandModelInstall(cfg: EmbedConfig, args: string[]): Promise<void> {
-  const result = await installModel(cfg, {
-    refresh: has(args, "--refresh"),
-    source: flag(args, "--source"),
-  });
-  if (has(args, "--json")) printJson(result);
-  else {
-    console.log(`model: ${result.path}`);
-    console.log(`sha256: ${result.sha256}`);
-    console.log(`source: ${result.source}; ${(result.bytes / 1024 ** 3).toFixed(2)} GiB`);
+  const requested = args.find((arg) => arg === "embedding" || arg === "reranker" || arg === "all");
+  const target = requested ?? "all";
+  const source = flag(args, "--source");
+  if (source && target === "all") {
+    throw new Error(
+      "pick one model for --source: gbrain-embed model install <embedding|reranker> --source ...",
+    );
   }
+  const keys: ModelKey[] = target === "all" ? MODEL_KEYS : [target as ModelKey];
+  const results: Partial<Record<ModelKey, unknown>> = {};
+  for (const key of keys) {
+    const result = await installModel(cfg, key, {
+      refresh: has(args, "--refresh"),
+      source,
+    });
+    results[key] = result;
+    if (!has(args, "--json")) {
+      console.log(`${modelDescriptors(cfg)[key].label}: ${result.path}`);
+      console.log(`  sha256: ${result.sha256}`);
+      console.log(`  source: ${result.source}; ${(result.bytes / 1024 ** 3).toFixed(2)} GiB`);
+    }
+  }
+  if (has(args, "--json")) printJson(target === "all" ? results : results[keys[0]]);
 }
 
 async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
   const json = has(args, "--json");
-  const model = await installModel(cfg, {});
+  const models = await installModel(cfg, "embedding", {});
+  const rerankerModel = cfg.reranker.enabled
+    ? await installModel(cfg, "reranker", {})
+    : null;
   if (!json) {
-    console.log(`model ready: ${model.path}`);
-    console.log(`sha256: ${model.sha256}`);
+    console.log(`embedding model ready: ${models.path}`);
+    console.log(`  sha256: ${models.sha256}`);
+    if (rerankerModel) {
+      console.log(`reranker model ready: ${rerankerModel.path}`);
+      console.log(`  sha256: ${rerankerModel.sha256}`);
+    }
   }
 
   let temporary: EmbedService | null = null;
   let health = await fetchHealth(cfg);
   if (!health) {
-    temporary = new EmbedService(cfg, new Upstream(cfg));
+    temporary = new EmbedService(cfg, new Upstream(cfg, "embedding"), new Upstream(cfg, "reranker"));
     temporary.start();
     health = await fetchHealth(cfg);
     if (!health) throw new Error("started the embedding proxy but /health did not answer");
-    if (!json) console.log(`embedding proxy started for setup on ${listenBase(cfg)}`);
+    if (!json) console.log(`proxy started for setup on ${listenBase(cfg)}`);
   }
 
   try {
@@ -271,6 +352,19 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
     }
 
     mustGbrain(cfg, ["config", "set", "embedding_query_prefix", QUERY_PREFIX], json);
+
+    if (cfg.reranker.enabled) {
+      mustGbrain(cfg, [
+        "config", "set", "provider_base_urls.llama-server-reranker", `${listenBase(cfg)}/v1`,
+      ], json);
+      mustGbrain(cfg, [
+        "config", "set", "search.reranker.model", `llama-server-reranker:${cfg.reranker.modelId}`,
+      ], json);
+      mustGbrain(cfg, ["config", "set", "search.reranker.enabled", "true"], json);
+    } else {
+      mustGbrain(cfg, ["config", "set", "search.reranker.enabled", "false"], json);
+    }
+
     mustGbrain(cfg, ["embed", "--stale", "--catch-up"], json);
     mustGbrain(cfg, ["doctor", "--only", "embeddings", "--json"], json);
 
@@ -278,15 +372,27 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
       status: "enabled",
       model: `llama-server:${cfg.modelId}`,
       dimensions: cfg.dimensions,
-      modelPath: model.path,
-      sha256: model.sha256,
+      modelPath: models.path,
+      sha256: models.sha256,
       listen: `${listenBase(cfg)}/v1`,
       mode: readMode(cfg),
+      reranker: cfg.reranker.enabled
+        ? {
+            enabled: true,
+            model: `llama-server-reranker:${cfg.reranker.modelId}`,
+            modelPath: rerankerModel?.path ?? cfg.reranker.modelPath,
+            sha256: rerankerModel?.sha256 ?? null,
+            listen: `${listenBase(cfg)}/v1`,
+          }
+        : { enabled: false },
       enable: enabled.out.trim() ? safeJson(enabled.out) : null,
     };
     if (json) printJson(summary);
     else {
       console.log(`embeddings enabled: llama-server:${cfg.modelId} (${cfg.dimensions}d)`);
+      if (cfg.reranker.enabled) {
+        console.log(`reranker enabled: llama-server-reranker:${cfg.reranker.modelId}`);
+      }
       console.log(`endpoint: ${listenBase(cfg)}/v1; mode: ${summary.mode}`);
     }
   } finally {
@@ -318,36 +424,55 @@ async function embedBatch(cfg: EmbedConfig, texts: string[]): Promise<number[][]
   return body.data.map((item) => item.embedding ?? []);
 }
 
-async function commandBench(cfg: EmbedConfig, args: string[]): Promise<void> {
-  const mode = flag(args, "--mode");
-  if (mode === "background" || mode === "throughput") {
-    writeMode(cfg, mode);
-    try {
-      await fetch(`${listenBase(cfg)}/admin/mode`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode }),
-        signal: AbortSignal.timeout(5_000),
-      });
-    } catch {
-      /* the proxy may not be running; the bench will start its own */
-    }
-  }
-  const health = await fetchHealth(cfg);
-  if (!health) {
-    throw new Error(`the proxy is not running; start it with \`gbrain-embed serve\` or activate the launchd agent`);
-  }
-  await fetch(`${listenBase(cfg)}/admin/restart`, {
+interface RerankItem {
+  index: number;
+  relevance_score: number;
+}
+
+async function rerankBatch(
+  cfg: EmbedConfig,
+  query: string,
+  documents: string[],
+): Promise<RerankItem[]> {
+  const response = await fetch(`${listenBase(cfg)}/v1/rerank`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: cfg.reranker.modelId,
+      query,
+      documents,
+    }),
+    signal: AbortSignal.timeout(cfg.requestTimeoutMs),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`rerank request failed (${response.status}): ${text}`);
+  const body = JSON.parse(text) as { results?: RerankItem[] };
+  if (!Array.isArray(body.results) || body.results.length !== documents.length) {
+    throw new Error(
+      `rerank response held ${body.results?.length ?? 0} scores for ${documents.length} documents`,
+    );
+  }
+  return body.results;
+}
+
+async function unload(cfg: EmbedConfig, model: UnloadTarget): Promise<void> {
+  await fetch(`${listenBase(cfg)}/admin/unload`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model }),
     signal: AbortSignal.timeout(10_000),
   });
+}
 
-  const count = Number(flag(args, "--texts") ?? 32);
-  const texts = Array.from({ length: count }, (_, index) =>
+function benchTexts(count: number): string[] {
+  return Array.from({ length: count }, (_, index) =>
     (`The appellant argues that the lower court erred in its assessment of the evidence. `.repeat(8) +
       ` [doc ${index}]`).slice(0, 1000),
   );
+}
 
+async function benchEmbeddings(cfg: EmbedConfig, texts: string[], count: number): Promise<unknown> {
+  await unload(cfg, "embedding");
   const coldStart = Date.now();
   await embedBatch(cfg, texts.slice(0, 2));
   const coldStartMs = Date.now() - coldStart;
@@ -365,8 +490,7 @@ async function commandBench(cfg: EmbedConfig, args: string[]): Promise<void> {
   warm.sort((a, b) => a - b);
   const median = warm[1];
   const after = await fetchHealth(cfg);
-  const result = {
-    mode: after?.mode ?? readMode(cfg),
+  return {
     texts: count,
     coldStartMs,
     warmMs: median,
@@ -374,16 +498,109 @@ async function commandBench(cfg: EmbedConfig, args: string[]): Promise<void> {
     rssBytes: after?.rssBytes ?? null,
     upstream: after?.upstream ?? null,
   };
-  if (has(args, "--json")) printJson(result);
-  else {
-    console.log(`mode: ${result.mode}; texts: ${count}`);
-    console.log(`cold start: ${(coldStartMs / 1000).toFixed(1)}s`);
-    console.log(`warm: ${(median / 1000).toFixed(2)}s (${result.textsPerSecond.toFixed(2)} texts/s)`);
-    console.log(`rss: ${humanBytes(result.rssBytes)}; upstream: ${result.upstream?.state ?? "unknown"}`);
+}
+
+async function benchReranker(cfg: EmbedConfig, documents: string[], count: number): Promise<unknown> {
+  const query = "Does the lower court's assessment of the evidence withstand appeal?";
+  await unload(cfg, "reranker");
+  const coldStart = Date.now();
+  await rerankBatch(cfg, query, documents.slice(0, 10));
+  const coldStartMs = Date.now() - coldStart;
+
+  const warm: number[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    const started = Date.now();
+    const results = await rerankBatch(cfg, query, documents);
+    const elapsed = Date.now() - started;
+    if (results.some((result) => typeof result.relevance_score !== "number")) {
+      throw new Error("a rerank result did not carry a numeric relevance_score");
+    }
+    warm.push(elapsed);
+  }
+  warm.sort((a, b) => a - b);
+  const median = warm[1];
+  const after = await fetchHealth(cfg);
+  return {
+    documents: count,
+    coldStartMs,
+    warmMs: median,
+    documentsPerSecond: count / (median / 1000),
+    rssBytes: after?.reranker?.rssBytes ?? null,
+    upstream: after?.reranker?.upstream ?? null,
+  };
+}
+
+async function commandBench(cfg: EmbedConfig, args: string[]): Promise<void> {
+  const mode = flag(args, "--mode");
+  if (mode === "background" || mode === "throughput") {
+    writeMode(cfg, mode);
+    try {
+      await fetch(`${listenBase(cfg)}/admin/mode`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode }),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      /* the proxy may not be running; the bench will start its own */
+    }
+  }
+  const requested = flag(args, "--model") ?? "all";
+  if (requested !== "all" && requested !== "embedding" && requested !== "reranker") {
+    throw new Error("--model must be embedding, reranker or all");
+  }
+  if (requested !== "embedding" && !cfg.reranker.enabled) {
+    throw new Error("the reranker is disabled in the config");
+  }
+  const health = await fetchHealth(cfg);
+  if (!health) {
+    throw new Error(`the proxy is not running; start it with \`gbrain-embed serve\` or activate the launchd agent`);
+  }
+
+  const count = Number(flag(args, "--texts") ?? 32);
+  const texts = benchTexts(Number.isFinite(count) && count > 0 ? count : 32);
+  const result: Record<string, unknown> = { mode: health.mode };
+  if (requested === "all" || requested === "embedding") {
+    result.embeddings = await benchEmbeddings(cfg, texts, texts.length);
+  }
+  if (requested === "all" || requested === "reranker") {
+    result.reranking = await benchReranker(cfg, texts, texts.length);
+  }
+
+  if (has(args, "--json")) {
+    printJson(result);
+    return;
+  }
+  console.log(`mode: ${String(result.mode)}`);
+  const embeddings = result.embeddings as
+    | { texts: number; coldStartMs: number; warmMs: number; textsPerSecond: number; rssBytes: number | null }
+    | undefined;
+  if (embeddings) {
+    console.log(`embedding: ${embeddings.texts} texts`);
+    console.log(`  cold start: ${(embeddings.coldStartMs / 1000).toFixed(1)}s`);
+    console.log(
+      `  warm: ${(embeddings.warmMs / 1000).toFixed(2)}s (${embeddings.textsPerSecond.toFixed(2)} texts/s)`,
+    );
+    console.log(`  rss: ${humanBytes(embeddings.rssBytes)}`);
+  }
+  const reranking = result.reranking as
+    | { documents: number; coldStartMs: number; warmMs: number; documentsPerSecond: number; rssBytes: number | null }
+    | undefined;
+  if (reranking) {
+    console.log(`reranker: ${reranking.documents} documents`);
+    console.log(`  cold start: ${(reranking.coldStartMs / 1000).toFixed(1)}s`);
+    console.log(
+      `  warm: ${(reranking.warmMs / 1000).toFixed(2)}s (${reranking.documentsPerSecond.toFixed(2)} docs/s)`,
+    );
+    console.log(`  rss: ${humanBytes(reranking.rssBytes)}`);
   }
 }
 
 async function commandRestart(cfg: EmbedConfig, args: string[]): Promise<void> {
+  const requested = flag(args, "--model") ?? "all";
+  if (requested !== "all" && requested !== "embedding" && requested !== "reranker") {
+    throw new Error("--model must be embedding, reranker or all");
+  }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const result = Bun.spawnSync({
     cmd: ["launchctl", "kickstart", "-k", `gui/${uid}/name.fmu.gbrain-embed`],
@@ -391,17 +608,21 @@ async function commandRestart(cfg: EmbedConfig, args: string[]): Promise<void> {
     stderr: "pipe",
   });
   if (result.exitCode === 0) {
-    if (has(args, "--json")) printJson({ restarted: "launchd", label: "name.fmu.gbrain-embed" });
-    else console.log("restarted name.fmu.gbrain-embed");
+    if (has(args, "--json")) printJson({ restarted: "launchd", label: "name.fmu.gbrain-embed", model: requested });
+    else console.log(`restarted name.fmu.gbrain-embed (${requested})`);
     return;
   }
   try {
-    await fetch(`${listenBase(cfg)}/admin/restart`, {
-      method: "POST",
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (has(args, "--json")) printJson({ restarted: "proxy", label: "name.fmu.gbrain-embed" });
-    else console.log("asked the running proxy to stop its child");
+    if (requested === "all") {
+      await fetch(`${listenBase(cfg)}/admin/restart`, {
+        method: "POST",
+        signal: AbortSignal.timeout(10_000),
+      });
+    } else {
+      await unload(cfg, requested);
+    }
+    if (has(args, "--json")) printJson({ restarted: "proxy", label: "name.fmu.gbrain-embed", model: requested });
+    else console.log(`asked the running proxy to drop its ${requested} child`);
   } catch (error) {
     throw new Error(
       `launchctl kickstart failed (${result.stderr.toString().trim()}) and the proxy is unreachable: ` +
@@ -432,7 +653,7 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "model": {
       const sub = rest[0];
-      if (sub !== "install") throw new Error("usage: gbrain-embed model install [--refresh] [--source ...]");
+      if (sub !== "install") throw new Error("usage: gbrain-embed model install [embedding|reranker|all] [--refresh] [--source ...]");
       await commandModelInstall(cfg, rest.slice(1));
       return;
     }
@@ -457,4 +678,4 @@ if (import.meta.main) {
   });
 }
 
-export { main, MODEL_SHA256 };
+export { main };
