@@ -28,23 +28,47 @@ stable URL, and the model is resident only while it is being used.
 
 ## Requirements
 
-- [Bun](https://bun.sh/) (or the Nix package, below)
+- [Bun](https://bun.sh/) ≥ 1.4 (the Homebrew tap and the Nix package install it)
 - `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp)
-  (`brew install llama.cpp` on macOS)
+  (`brew install llama.cpp`; the Homebrew tap installs it as a dependency)
 - A Qwen3-Embedding GGUF. The default is
   `batiai/Qwen3-Embedding-4B-GGUF` Q6_K, which is also the bytes behind the
   Ollama tag `batiai/qwen3-embedding:4b`.
 
-## Quick start
+## Installation
 
-With Nix:
+### Homebrew
+
+The tap carries no Nix references: `bun` and `llama.cpp` come from Homebrew.
+
+```bash
+brew tap fmu/homebrew https://github.com/fmu/homebrew.git
+brew install gbrain-embed
+```
+
+Homebrew derives the clone URL only for `homebrew-*` repositories; this
+multi-formula tap is called `homebrew`, so pass the URL explicitly once.
+
+The formula registers a `brew services` agent for `gbrain-embed serve`:
+
+```bash
+gbrain-embed model install      # 3.3 GB GGUF, SHA-256 verified
+gbrain-embed setup              # configure gbrain and backfill
+brew services start gbrain-embed
+brew services info gbrain-embed
+```
+
+`gbrain` itself is not a Homebrew formula; install it separately and keep it on
+`PATH` (a global npm/bun install lands in `$(brew --prefix)/bin`).
+
+### Nix
 
 ```bash
 nix build .#gbrain-embed
 ./result/bin/gbrain-embed --help
 ```
 
-Without Nix:
+### From source
 
 ```bash
 bun src/cli.ts --help
@@ -126,7 +150,7 @@ child so the next request starts the new profile.
 
 The `restart` command targets the launchd label `name.fmu.gbrain-embed`, the
 label used by the reference deployment. Change it in `src/cli.ts` if you use a
-different one.
+different one; with the Homebrew tap use `brew services restart gbrain-embed`.
 
 ## HTTP surface
 
