@@ -28,6 +28,8 @@ stable URL, and the model is resident only while it is being used.
 
 ## Requirements
 
+- The [`gbrain`](https://github.com/garrytan/gbrain) CLI on `PATH`
+  (`brew install gbrain` from the tap below)
 - [Bun](https://bun.sh/) ≥ 1.4 (the Homebrew tap and the Nix package install it)
 - `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp)
   (`brew install llama.cpp`; the Homebrew tap installs it as a dependency)
@@ -44,7 +46,7 @@ The tap carries no Nix references: `bun` and `llama.cpp` come from Homebrew.
 ```bash
 brew tap fmu/homebrew https://github.com/fmu/homebrew.git
 brew trust fmu/homebrew
-brew install gbrain-embed
+brew install gbrain gbrain-embed
 ```
 
 Homebrew derives the clone URL only for `homebrew-*` repositories; this
@@ -61,8 +63,16 @@ brew services start gbrain-embed
 brew services info gbrain-embed
 ```
 
-`gbrain` itself is not a Homebrew formula; install it separately and keep it on
-`PATH` (a global npm/bun install lands in `$(brew --prefix)/bin`).
+The same tap also carries gbrain itself:
+
+```bash
+brew install gbrain
+```
+
+It is not the unrelated npm package: the formula installs upstream's
+self-contained binary, leaves the in-place `gbrain upgrade` channel working,
+and a scheduled workflow re-pins it to each upstream release so `brew upgrade
+gbrain` tracks upstream too.
 
 ### Nix
 
