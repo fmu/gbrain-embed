@@ -43,11 +43,14 @@ The tap carries no Nix references: `bun` and `llama.cpp` come from Homebrew.
 
 ```bash
 brew tap fmu/homebrew https://github.com/fmu/homebrew.git
+brew trust fmu/homebrew
 brew install gbrain-embed
 ```
 
 Homebrew derives the clone URL only for `homebrew-*` repositories; this
 multi-formula tap is called `homebrew`, so pass the URL explicitly once.
+Homebrew 5+ also keeps third-party taps untrusted until `brew trust` names
+them.
 
 The formula registers a `brew services` agent for `gbrain-embed serve`:
 
