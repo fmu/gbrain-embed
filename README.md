@@ -71,16 +71,17 @@ launch, so the two-model design is also the only one that works: two
 The tap carries no Nix references: `bun` and `llama.cpp` come from Homebrew.
 
 ```bash
-brew tap fmu/homebrew https://github.com/fmu/homebrew.git
-brew trust fmu/homebrew
+brew tap fmu/tap
+brew trust fmu/tap
 brew install qwen3-embed
 brew install gbrain          # optional: only for `qwen3-embed setup-gbrain`
 ```
 
-Homebrew derives the clone URL only for `homebrew-*` repositories; this
-multi-formula tap is called `homebrew`, so pass the URL explicitly once.
-Homebrew 5+ also keeps third-party taps untrusted until `brew trust` names
-them.
+The tap is the [`fmu/tap`](https://github.com/fmu/tap) repository, so naming it
+needs no URL: Homebrew derives the conventional `fmu/homebrew-tap` clone URL,
+which GitHub redirects to `fmu/tap`, and `brew install fmu/tap/qwen3-embed`
+taps it the same way. Homebrew 5+ also keeps third-party taps untrusted until
+`brew trust` names them.
 
 The formula registers a `brew services` agent for `qwen3-embed serve`:
 
