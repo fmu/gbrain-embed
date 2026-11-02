@@ -17,7 +17,7 @@ import {
 const temps: string[] = [];
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "gbrain-embed-config-"));
+  const dir = mkdtempSync(join(tmpdir(), "qwen3-embed-config-"));
   temps.push(dir);
   return dir;
 }
@@ -72,7 +72,7 @@ describe("loadConfig", () => {
   });
 
   test("defaults the config path to the user config directory", () => {
-    expect(defaultConfigPath()).toContain(join("gbrain-embed", "config.json"));
+    expect(defaultConfigPath()).toContain(join("qwen3-embed", "config.json"));
   });
 
   test("merges a partial file over the defaults, including one mode profile", () => {

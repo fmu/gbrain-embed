@@ -12,7 +12,7 @@ Also stores a disjoint latency document pool (~1000-2000 char docs).
 """
 import json, os, random, sys
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 DATA = os.path.join(ROOT, "scifact")
 OUT = os.path.join(ROOT, "eval_set.json")
 N_QUERIES = 60

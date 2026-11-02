@@ -204,7 +204,7 @@ interface ErrorBody {
 let harness: Harness | null = null;
 
 function makeService(options: MakeOptions = {}): Harness {
-  const temp = mkdtempSync(join(tmpdir(), "gbrain-embed-test-"));
+  const temp = mkdtempSync(join(tmpdir(), "qwen3-embed-test-"));
   const embeddingHttp = startEmbeddingServer(
     options.vectors ?? [[3, 4, 0, 0]],
     options.embeddingStatus ?? 200,

@@ -7,7 +7,7 @@
 }:
 
 writeShellApplication {
-  name = "gbrain-embed";
+  name = "qwen3-embed";
   runtimeInputs = [
     bun
     curl
@@ -17,9 +17,9 @@ writeShellApplication {
     exec ${bun}/bin/bun ${./src}/cli.ts "$@"
   '';
   meta = {
-    description = "On-demand local embeddings and reranking for gbrain, served by llama.cpp";
-    homepage = "https://github.com/fmu/gbrain-embed";
-    mainProgram = "gbrain-embed";
+    description = "On-demand local Qwen3 embeddings and reranking, served by llama.cpp";
+    homepage = "https://github.com/fmu/qwen3-embed";
+    mainProgram = "qwen3-embed";
     platforms = lib.platforms.unix;
   };
 }

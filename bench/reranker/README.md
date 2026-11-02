@@ -5,7 +5,7 @@ These are the scripts used to produce
 Q8_0 (ggml-org) vs locally re-quantized Q4_K_M/Q5_K_M/Q6_K from that verified
 Q8_0, on BEIR SciFact.
 
-They were written for a scratch directory (`/tmp/gbrain-rerank-bench`) and
+They were written for a scratch directory (`/tmp/qwen3-rerank-bench`) and
 still reference those absolute paths. To reproduce, create that directory with
 `models/`, `logs/`, `results/`, the SciFact split (`scifact/` with
 `corpus.jsonl`, `queries.jsonl`, `qrels/test.tsv`), and put the GGUF files in

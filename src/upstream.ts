@@ -221,8 +221,8 @@ export class Upstream implements UpstreamLike {
 
   private installHint(): string {
     return this.kind === "reranker"
-      ? "run `gbrain-embed model install reranker`"
-      : "run `gbrain-embed model install`";
+      ? "run `qwen3-embed model install reranker`"
+      : "run `qwen3-embed model install`";
   }
 
   private label(): string {
@@ -288,7 +288,7 @@ export class Upstream implements UpstreamLike {
         this.removeRecord();
         if (code !== 0) {
           console.error(
-            `[gbrain-embed] ${this.label()} exited with ${code}: ${readLogTail(paths.errLogPath)}`,
+            `[qwen3-embed] ${this.label()} exited with ${code}: ${readLogTail(paths.errLogPath)}`,
           );
         }
       })
@@ -385,7 +385,7 @@ export class Upstream implements UpstreamLike {
       command = result.stdout.toString().trim();
     } catch (error) {
       // `ps` can be unavailable in a sandbox; never kill on an unverifiable identity.
-      console.error(`[gbrain-embed] could not verify orphan ${this.label()} pid ${record.pid}: ${String(error)}`);
+      console.error(`[qwen3-embed] could not verify orphan ${this.label()} pid ${record.pid}: ${String(error)}`);
       return;
     }
     if (!commandLineMatches(command, this.cfg, this.kind)) {
@@ -411,7 +411,7 @@ export class Upstream implements UpstreamLike {
       }
     }
     this.removeRecord();
-    console.error(`[gbrain-embed] stopped orphaned ${this.label()} pid ${record.pid}`);
+    console.error(`[qwen3-embed] stopped orphaned ${this.label()} pid ${record.pid}`);
   }
 
   /** Resident set size of the child, in bytes, or null when stopped. */
@@ -456,7 +456,7 @@ export class Upstream implements UpstreamLike {
       });
     } catch (error) {
       console.error(
-        `[gbrain-embed] could not write ${pathsFor(this.cfg, this.kind).statePath}: ${String(error)}`,
+        `[qwen3-embed] could not write ${pathsFor(this.cfg, this.kind).statePath}: ${String(error)}`,
       );
     }
   }

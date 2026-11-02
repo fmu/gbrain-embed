@@ -14,7 +14,7 @@ HOST = "127.0.0.1"
 PORT = 18084
 BASE = f"http://{HOST}:{PORT}"
 ALIAS = "qwen3-reranker-0.6b"
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 LOGS = os.path.join(ROOT, "logs")
 
 SERVER_ARGS = [

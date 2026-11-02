@@ -1,5 +1,5 @@
 {
-  description = "On-demand Qwen3 embeddings and reranking for gbrain, served by llama.cpp";
+  description = "On-demand Qwen3 embeddings and reranking over an OpenAI-compatible endpoint, served by llama.cpp";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -16,20 +16,20 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        gbrain-embed = pkgs.callPackage ./package.nix { };
-        default = gbrain-embed;
+        qwen3-embed = pkgs.callPackage ./package.nix { };
+        default = qwen3-embed;
       });
 
       # NixOS and nix-darwin modules; the option tree is
-      # `services.gbrain-embed.*` in both cases.
+      # `services.qwen3-embed.*` in both cases.
       nixosModules = {
         default = ./modules/nixos.nix;
-        gbrain-embed = ./modules/nixos.nix;
+        qwen3-embed = ./modules/nixos.nix;
       };
 
       darwinModules = {
         default = ./modules/darwin.nix;
-        gbrain-embed = ./modules/darwin.nix;
+        qwen3-embed = ./modules/darwin.nix;
       };
     };
 }

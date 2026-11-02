@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render /tmp/gbrain-rerank-bench/report.md from report.json.
+"""Render /tmp/qwen3-rerank-bench/report.md from report.json.
 
 All numbers are read from report.json; the recommendation is derived from explicit
 thresholds so it cannot drift from the measurements.
@@ -7,7 +7,7 @@ thresholds so it cannot drift from the measurements.
 import json
 import os
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 REF = "q8_0"
 LABELS = {
     "q8_0": "Q8_0 (ggml-org)",
@@ -637,7 +637,7 @@ def build_recommendation(r):
         "tensor count fully parsed) to lack the reranker classifier head "
         "`cls.output.weight`; llama-server loads them but returns degenerate ~1e-9 "
         "scores (~9 orders of magnitude below a working classifier). Shipping a "
-        "quantized default would require gbrain to build/quantize the GGUF locally from a "
+        "quantized default would require qwen3-embed to build/quantize the GGUF locally from a "
         "conversion that preserves the head, and to assert `cls.output.weight` presence.")
     caveats.append(
         "The measured quantized files were produced locally with "

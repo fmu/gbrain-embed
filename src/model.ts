@@ -252,7 +252,7 @@ export async function installModel(
     // A hardlink/copy from an unexpected source is allowed only if the digest
     // matches, but a size mismatch means the digest check is the one that
     // matters; report the size for the operator.
-    console.error(`[gbrain-embed] model size is ${bytes} bytes (expected ${descriptor.sizeBytes})`);
+    console.error(`[qwen3-embed] model size is ${bytes} bytes (expected ${descriptor.sizeBytes})`);
   }
   return { key, path: target, sha256: digest, source: usedSource, bytes };
 }

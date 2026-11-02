@@ -1,11 +1,16 @@
-# gbrain-embed
+# qwen3-embed
 
-An on-demand local embedding **and reranking** service for
-[gbrain](https://github.com/garrytan/gbrain).
+An on-demand local **embedding and reranking** service for Qwen3 models,
+served by [llama.cpp](https://github.com/ggml-org/llama.cpp) behind one
+loopback, OpenAI-compatible endpoint. Nothing here is specific to a single
+consumer: any client that speaks the OpenAI embeddings API can use it. One
+intended use is [gbrain](https://github.com/garrytan/gbrain) embedding, where
+the same endpoint also serves `POST /v1/rerank` for gbrain's
+`llama-server-reranker` recipe.
 
 It is a small loopback proxy that speaks the OpenAI embeddings API and also
-serves `POST /v1/rerank` for gbrain's `llama-server-reranker` recipe. Two
-`llama-server` children sit behind it, one per model:
+serves `POST /v1/rerank` in llama.cpp's rerank shape. Two `llama-server`
+children sit behind it, one per model:
 
 - the embedding model (Qwen3-Embedding-4B GGUF), and
 - the reranker (Qwen3-Reranker-0.6B GGUF).
@@ -24,7 +29,9 @@ launch, so the two-model design is also the only one that works: two
 
 - **One endpoint, two models** — `/v1/embeddings` and `/v1/rerank` on
   `127.0.0.1:8082`; `/v1/models` lists both ids; `/health` reports both
-  children.
+  children. The embedding route is plain OpenAI; no gbrain is required.
+- **Optional gbrain integration** — `setup` points gbrain at the endpoint,
+  enables the reranker recipe and backfills, but only when you ask for it.
 - **Independent lazy start / idle unload** — the embedding server follows the
   active mode's TTL, the reranker has its own `reranker.ttlSeconds`; each is
   loaded only while it is being used.
@@ -45,13 +52,14 @@ launch, so the two-model design is also the only one that works: two
 
 ## Requirements
 
-- The [`gbrain`](https://github.com/garrytan/gbrain) CLI on `PATH`
-  (`brew install gbrain` from the tap below)
+- Optional: the [`gbrain`](https://github.com/garrytan/gbrain) CLI on `PATH`
+  (`brew install gbrain` from the tap below), used only by `setup`/`model`;
+  `serve` never needs it
 - [Bun](https://bun.sh/) ≥ 1.4 (the Homebrew tap and the Nix package install it)
 - `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) with
   reranking support (`--reranking`, `POST /v1/rerank`; a current Homebrew
   build or nixpkgs `llama-cpp` has it)
-- The model GGUFs (installed by `gbrain-embed model install`):
+- The model GGUFs (installed by `qwen3-embed model install`):
   - embedding: `batiai/Qwen3-Embedding-4B-GGUF` Q6_K, ~3.3 GB
   - reranker: `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` Q8_0, ~0.64 GB
 
@@ -64,7 +72,8 @@ The tap carries no Nix references: `bun` and `llama.cpp` come from Homebrew.
 ```bash
 brew tap fmu/homebrew https://github.com/fmu/homebrew.git
 brew trust fmu/homebrew
-brew install gbrain gbrain-embed
+brew install qwen3-embed
+brew install gbrain          # optional: only for `qwen3-embed setup`
 ```
 
 Homebrew derives the clone URL only for `homebrew-*` repositories; this
@@ -72,19 +81,20 @@ multi-formula tap is called `homebrew`, so pass the URL explicitly once.
 Homebrew 5+ also keeps third-party taps untrusted until `brew trust` names
 them.
 
-The formula registers a `brew services` agent for `gbrain-embed serve`:
+The formula registers a `brew services` agent for `qwen3-embed serve`:
 
 ```bash
-gbrain-embed model install      # both GGUFs, SHA-256 verified
-gbrain-embed setup              # configure gbrain (embeddings + reranker) and backfill
-brew services start gbrain-embed
-brew services info gbrain-embed
+qwen3-embed model install      # both GGUFs, SHA-256 verified
+qwen3-embed setup              # configure gbrain (embeddings + reranker) and backfill
+brew services start qwen3-embed
+brew services info qwen3-embed
 ```
 
 `model install embedding` installs only the embedder and `model install
 reranker` only the reranker.
 
-The same tap also carries gbrain itself:
+The same tap also carries gbrain itself, needed only for the `setup`
+integration:
 
 ```bash
 brew install gbrain
@@ -95,16 +105,32 @@ self-contained binary, leaves the in-place `gbrain upgrade` channel working,
 and a scheduled workflow re-pins it to each upstream release so `brew upgrade
 gbrain` tracks upstream too.
 
+### Migrating from `gbrain-embed`
+
+The project was called `gbrain-embed` up to v0.2.0. From v0.3.0 the package,
+binary, env var and paths are all `qwen3-embed`; existing installs need:
+
+```bash
+brew uninstall gbrain-embed
+mv ~/.local/share/gbrain-embed ~/.local/share/qwen3-embed
+mv ~/.local/state/gbrain-embed  ~/.local/state/qwen3-embed
+mv ~/.config/gbrain-embed      ~/.config/qwen3-embed
+brew install fmu/tap/qwen3-embed
+```
+
+`GBRAIN_EMBED_CONFIG` is now `QWEN3_EMBED_CONFIG`, and the `brew services`
+launchd label moves from `name.fmu.gbrain-embed` to `name.fmu.qwen3-embed`.
+
 ### Nix
 
 ```bash
-nix build .#gbrain-embed
-./result/bin/gbrain-embed --help
+nix build .#qwen3-embed
+./result/bin/qwen3-embed --help
 ```
 
 For a managed service, use the [NixOS or nix-darwin module](#nix-flake)
 instead; module consumers get `llama-server` from nixpkgs and a declarative
-`services.gbrain-embed` configuration.
+`services.qwen3-embed` configuration.
 
 ### From source
 
@@ -117,7 +143,7 @@ Write a config (or let the defaults apply):
 ```json
 {
   "llamaServer": "/opt/homebrew/bin/llama-server",
-  "modelPath": "/Users/you/.local/share/gbrain-embed/models/qwen3-embedding-4b-q6_k.gguf",
+  "modelPath": "/Users/you/.local/share/qwen3-embed/models/qwen3-embedding-4b-q6_k.gguf",
   "modelId": "qwen3-embedding-4b",
   "nativeDimensions": 2560,
   "dimensions": 1536,
@@ -126,7 +152,7 @@ Write a config (or let the defaults apply):
   "defaultMode": "background",
   "reranker": {
     "enabled": true,
-    "modelPath": "/Users/you/.local/share/gbrain-embed/models/qwen3-reranker-0.6b-q8_0.gguf",
+    "modelPath": "/Users/you/.local/share/qwen3-embed/models/qwen3-reranker-0.6b-q8_0.gguf",
     "modelId": "qwen3-reranker-0.6b",
     "upstreamPort": 8084,
     "ttlSeconds": 300,
@@ -136,18 +162,18 @@ Write a config (or let the defaults apply):
 }
 ```
 
-The service reads `~/.config/gbrain-embed/config.json` by default;
-`GBRAIN_EMBED_CONFIG` or `--config <path>` override it. Missing keys take the
+The service reads `~/.config/qwen3-embed/config.json` by default;
+`QWEN3_EMBED_CONFIG` or `--config <path>` override it. Missing keys take the
 defaults above; a partial `reranker` object is merged over the reranker
 defaults. `listenPort`, `upstreamPort` and `reranker.upstreamPort` must all
 differ.
 
 ```bash
-gbrain-embed model install          # both models
-gbrain-embed model install reranker # just the reranker
-gbrain-embed serve                  # the proxy; normally run by launchd/systemd
-gbrain-embed status
-gbrain-embed bench                  # both children: cold start, warm throughput, RSS
+qwen3-embed model install          # both models
+qwen3-embed model install reranker # just the reranker
+qwen3-embed serve                  # the proxy; normally run by launchd/systemd
+qwen3-embed status
+qwen3-embed bench                  # both children: cold start, warm throughput, RSS
 ```
 
 ## The two models are independent
@@ -162,20 +188,22 @@ gbrain-embed bench                  # both children: cold start, warm throughput
 | started by | `POST /v1/embeddings` | `POST /v1/rerank` |
 | stopped by | embedding idle TTL, `mode` switch, `/admin/unload` | reranker idle TTL, `/admin/unload` |
 
-`gbrain-embed mode <background|throughput>` writes the mode and stops the
+`qwen3-embed mode <background|throughput>` writes the mode and stops the
 embedding child so the next embedding request starts it with the new flags;
 the reranker keeps running. `POST /admin/unload` with
 `{"model":"embedding"|"reranker"|"all"}` targets one child explicitly.
 Cold-start requests are also safe: a model that takes longer to load than its
 idle TTL is not reaped mid-request.
 
-## Configuring gbrain
+## gbrain integration (optional)
 
-`gbrain-embed setup` is idempotent. It runs while `gbrain serve` is stopped,
-because gbrain's PGlite brain has a single writer:
+`qwen3-embed setup` is idempotent and entirely optional: it points gbrain at
+this endpoint, enables the embedding and reranker providers, and backfills. It
+runs while `gbrain serve` is stopped, because gbrain's PGlite brain has a
+single writer:
 
 ```bash
-gbrain-embed setup
+qwen3-embed setup
 ```
 
 It performs:
@@ -222,11 +250,11 @@ not a config edit.
 | reranker | unaffected | unaffected |
 
 ```bash
-gbrain-embed mode throughput
-gbrain-embed mode background
+qwen3-embed mode throughput
+qwen3-embed mode background
 ```
 
-The mode is persisted under `~/.local/state/gbrain-embed/`; switching stops the
+The mode is persisted under `~/.local/state/qwen3-embed/`; switching stops the
 embedding child so the next embedding request starts the new profile. The
 reranker has its own `reranker.ttlSeconds` and launch flags and is not part of
 the mode profiles.
@@ -245,9 +273,9 @@ the mode profiles.
 
 `--source` accepts `ollama:<tag>`, `hf:<repo>/<file>` or a filesystem path, and
 requires a single model target (it is ambiguous for `all`). The `restart`
-command targets the launchd label `name.fmu.gbrain-embed`, the label used by
+command targets the launchd label `name.fmu.qwen3-embed`, the label used by
 the reference deployment. Change it in `src/cli.ts` if you use a different
-one; with the Homebrew tap use `brew services restart gbrain-embed`.
+one; with the Homebrew tap use `brew services restart qwen3-embed`.
 
 ## HTTP surface
 
@@ -300,8 +328,8 @@ from the verified Q8_0 file
 
 ```bash
 llama-quantize --allow-requantize \
-  ~/.local/share/gbrain-embed/models/qwen3-reranker-0.6b-q8_0.gguf \
-  ~/.local/share/gbrain-embed/models/qwen3-reranker-0.6b-q4_k_m.gguf Q4_K_M
+  ~/.local/share/qwen3-embed/models/qwen3-reranker-0.6b-q8_0.gguf \
+  ~/.local/share/qwen3-embed/models/qwen3-reranker-0.6b-q4_k_m.gguf Q4_K_M
 ```
 
 then point `reranker.modelPath` at the new file and restart the service.
@@ -318,28 +346,28 @@ bun test
 
 The tests use fake upstream HTTP servers and fake children; no model or
 `llama-server` is needed. For a real smoke test, point a throwaway config at
-the GGUFs, run `gbrain-embed serve`, and check `/health`, `/v1/models`,
+the GGUFs, run `qwen3-embed serve`, and check `/health`, `/v1/models`,
 `/v1/embeddings` and `/v1/rerank`.
 
 ## Nix flake
 
 The flake exports the package plus a NixOS module and a nix-darwin module. Both
-modules expose the same `services.gbrain-embed.*` options, render them to
-`/etc/gbrain-embed/config.json`, and run `gbrain-embed serve` under the platform
+modules expose the same `services.qwen3-embed.*` options, render them to
+`/etc/qwen3-embed/config.json`, and run `qwen3-embed serve` under the platform
 service manager; `llama-server` comes from nixpkgs.
 
 ### Package
 
 ```nix
-inputs.gbrain-embed.url = "github:fmu/gbrain-embed";
+inputs.qwen3-embed.url = "github:fmu/qwen3-embed";
 # ...
-inputs.gbrain-embed.packages.${system}.gbrain-embed
+inputs.qwen3-embed.packages.${system}.qwen3-embed
 ```
 
 or directly:
 
 ```bash
-nix run github:fmu/gbrain-embed -- --help
+nix run github:fmu/qwen3-embed -- --help
 ```
 
 The package is a `writeShellApplication` that runs `src/cli.ts` with Bun and
@@ -350,19 +378,19 @@ puts `curl`/`coreutils` on `PATH` for the model installer. It does not pin a
 
 ```nix
 {
-  inputs.gbrain-embed.url = "github:fmu/gbrain-embed";
+  inputs.qwen3-embed.url = "github:fmu/qwen3-embed";
 
-  outputs = { self, nixpkgs, gbrain-embed, ... }: {
+  outputs = { self, nixpkgs, qwen3-embed, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
       modules = [
-        gbrain-embed.nixosModules.default
+        qwen3-embed.nixosModules.default
         {
-          services.gbrain-embed.enable = true;
+          services.qwen3-embed.enable = true;
           # optional:
-          # services.gbrain-embed.mode = "throughput";
-          # services.gbrain-embed.settings.modes.background.ttlSeconds = 600;
-          # services.gbrain-embed.rerankerTtlSeconds = 600;
-          # services.gbrain-embed.rerankerEnable = false;
+          # services.qwen3-embed.mode = "throughput";
+          # services.qwen3-embed.settings.modes.background.ttlSeconds = 600;
+          # services.qwen3-embed.rerankerTtlSeconds = 600;
+          # services.qwen3-embed.rerankerEnable = false;
         }
       ];
     };
@@ -370,37 +398,37 @@ puts `curl`/`coreutils` on `PATH` for the model installer. It does not pin a
 }
 ```
 
-The module creates a `gbrain-embed` system user, keeps the models and state
-under `/var/lib/gbrain-embed`, writes `/etc/gbrain-embed/config.json`, and
-starts `gbrain-embed.service`. Install the models once as the service user,
+The module creates a `qwen3-embed` system user, keeps the models and state
+under `/var/lib/qwen3-embed`, writes `/etc/qwen3-embed/config.json`, and
+starts `qwen3-embed.service`. Install the models once as the service user,
 then configure gbrain and backfill as yourself:
 
 ```bash
-sudo -u gbrain-embed /run/current-system/sw/bin/gbrain-embed \
-  --config /etc/gbrain-embed/config.json model install
-gbrain-embed --config /etc/gbrain-embed/config.json setup
+sudo -u qwen3-embed /run/current-system/sw/bin/qwen3-embed \
+  --config /etc/qwen3-embed/config.json model install
+qwen3-embed --config /etc/qwen3-embed/config.json setup
 ```
 
 `setup` reuses the running service, so it does not need write access to the
 service user's state directory. To run the proxy as your own login user instead
 of the dedicated account, set `user = "you"; createUser = false;` — the
-home-based defaults then apply and `gbrain-embed setup` works without the split
+home-based defaults then apply and `qwen3-embed setup` works without the split
 above.
 
 ### nix-darwin
 
 ```nix
 {
-  inputs.gbrain-embed.url = "github:fmu/gbrain-embed";
+  inputs.qwen3-embed.url = "github:fmu/qwen3-embed";
   inputs.nix-darwin.url = "github:nix-darwin/nix-darwin";
 
-  outputs = { self, nix-darwin, gbrain-embed, ... }: {
+  outputs = { self, nix-darwin, qwen3-embed, ... }: {
     darwinConfigurations.mac = nix-darwin.lib.darwinSystem {
       modules = [
-        gbrain-embed.darwinModules.default
+        qwen3-embed.darwinModules.default
         {
           system.primaryUser = "you"; # required by nix-darwin for user agents
-          services.gbrain-embed.enable = true;
+          services.qwen3-embed.enable = true;
         }
       ];
     };
@@ -408,13 +436,13 @@ above.
 }
 ```
 
-The module installs a launchd user agent (`org.nixos.gbrain-embed`), writes the
-same `/etc/gbrain-embed/config.json`, and keeps the models and state under your
+The module installs a launchd user agent (`org.nixos.qwen3-embed`), writes the
+same `/etc/qwen3-embed/config.json`, and keeps the models and state under your
 `$HOME` (the CLI defaults). Install the models and configure gbrain once:
 
 ```bash
-gbrain-embed --config /etc/gbrain-embed/config.json model install
-gbrain-embed --config /etc/gbrain-embed/config.json setup
+qwen3-embed --config /etc/qwen3-embed/config.json model install
+qwen3-embed --config /etc/qwen3-embed/config.json setup
 ```
 
 ### Options
@@ -446,7 +474,7 @@ Both modules share these options:
 | `configFile` | generated | rendered config passed with `--config` |
 
 NixOS-only: `user`, `group`, `createUser`, `dataDir` (defaults
-`gbrain-embed`, `gbrain-embed`, `true`, `/var/lib/gbrain-embed`).
+`qwen3-embed`, `qwen3-embed`, `true`, `/var/lib/qwen3-embed`).
 
 `gbrain` itself is not part of the flake; the proxy only shells out to it from
 the `setup` and `model` subcommands, never from `serve`.

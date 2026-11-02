@@ -9,7 +9,7 @@ lexically confusable non-relevant docs: the top-7 non-relevant docs by
 IDF-weighted query-term overlap. That makes the task discriminative enough to
 reveal quantization quality differences.
 
-Writes /tmp/gbrain-rerank-bench/eval_set_hard.json
+Writes /tmp/qwen3-rerank-bench/eval_set_hard.json
 """
 import json
 import math
@@ -19,7 +19,7 @@ import re
 import sys
 from collections import Counter
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 DATA = os.path.join(ROOT, "scifact")
 OUT = os.path.join(ROOT, "eval_set_hard.json")
 SEED = 42

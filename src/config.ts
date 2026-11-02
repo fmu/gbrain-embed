@@ -1,8 +1,8 @@
 /**
- * Configuration for the gbrain embedding supervisor.
+ * Configuration for the Qwen3 embedding and reranking supervisor.
  *
- * By default the service reads `~/.config/gbrain-embed/config.json` (or
- * `$XDG_CONFIG_HOME/gbrain-embed/config.json`); `GBRAIN_EMBED_CONFIG` or the
+ * By default the service reads `~/.config/qwen3-embed/config.json` (or
+ * `$XDG_CONFIG_HOME/qwen3-embed/config.json`); `QWEN3_EMBED_CONFIG` or the
  * `--config` flag override it. Every field has a `$HOME`-based default so the
  * CLI and the tests can run before any config file exists.
  *
@@ -73,13 +73,13 @@ const home = homedir();
 
 export const DEFAULT_MODEL_PATH = join(
   home,
-  ".local/share/gbrain-embed/models/qwen3-embedding-4b-q6_k.gguf",
+  ".local/share/qwen3-embed/models/qwen3-embedding-4b-q6_k.gguf",
 );
 export const DEFAULT_RERANKER_MODEL_PATH = join(
   home,
-  ".local/share/gbrain-embed/models/qwen3-reranker-0.6b-q8_0.gguf",
+  ".local/share/qwen3-embed/models/qwen3-reranker-0.6b-q8_0.gguf",
 );
-export const DEFAULT_STATE_DIR = join(home, ".local/state/gbrain-embed");
+export const DEFAULT_STATE_DIR = join(home, ".local/state/qwen3-embed");
 export const DEFAULT_LLAMA_SERVER = "/opt/homebrew/bin/llama-server";
 
 function defaultGbrainBin(): string {
@@ -194,12 +194,12 @@ export function validateConfig(cfg: EmbedConfig): EmbedConfig {
 }
 
 /**
- * The config file the service reads when neither `GBRAIN_EMBED_CONFIG` nor
+ * The config file the service reads when neither `QWEN3_EMBED_CONFIG` nor
  * `--config` names one.
  */
 export function defaultConfigPath(): string {
   const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
-  return join(base, "gbrain-embed", "config.json");
+  return join(base, "qwen3-embed", "config.json");
 }
 
 /**
@@ -207,7 +207,7 @@ export function defaultConfigPath(): string {
  * config is not an error: the CLI is useful before any config file exists.
  */
 export function loadConfig(
-  path: string | undefined = process.env.GBRAIN_EMBED_CONFIG ?? defaultConfigPath(),
+  path: string | undefined = process.env.QWEN3_EMBED_CONFIG ?? defaultConfigPath(),
 ): EmbedConfig {
   const base = defaultConfig();
   if (!path || !existsSync(path)) return validateConfig(base);

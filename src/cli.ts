@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * `gbrain-embed` CLI.
+ * `qwen3-embed` CLI.
  *
  * The launchd agent runs `serve`; everything else is operator-facing. The CLI
  * is deliberately dependency-free beyond Bun and the Homebrew llama.cpp build.
@@ -44,22 +44,22 @@ const MODEL_KEYS: ModelKey[] = ["embedding", "reranker"];
 
 function usage(): string {
   const cfg = loadConfig();
-  return `gbrain-embed — on-demand Qwen3 embeddings and reranking for gbrain
+  return `qwen3-embed — on-demand Qwen3 embeddings and reranking (OpenAI-compatible)
 
 Usage:
-  gbrain-embed serve                     Run the loopback proxy (launchd runs this)
-  gbrain-embed status [--json]           Show mode, child states, last requests, RSS
-  gbrain-embed mode <background|throughput> [--json]
+  qwen3-embed serve                     Run the loopback proxy (launchd runs this)
+  qwen3-embed status [--json]           Show mode, child states, last requests, RSS
+  qwen3-embed mode <background|throughput> [--json]
                                          Switch the embedding resource profile
-  gbrain-embed model install [embedding|reranker|all] [--refresh] [--source <ollama:tag|hf:repo/file|path>] [--json]
+  qwen3-embed model install [embedding|reranker|all] [--refresh] [--source <ollama:tag|hf:repo/file|path>] [--json]
                                          Hardlink/download the verified GGUFs
-  gbrain-embed setup [--json]            Install the models, configure gbrain, backfill
-  gbrain-embed bench [--model <embedding|reranker|all>] [--mode <m>] [--texts N] [--json]
+  qwen3-embed setup [--json]            Install the models, configure gbrain, backfill
+  qwen3-embed bench [--model <embedding|reranker|all>] [--mode <m>] [--texts N] [--json]
                                          Measure cold start, warm throughput and RSS
-  gbrain-embed restart [--model <embedding|reranker|all>] [--json]
+  qwen3-embed restart [--model <embedding|reranker|all>] [--json]
                                          Restart the launchd agent (or drop a child)
 
-Global: --config <path>  (or GBRAIN_EMBED_CONFIG)
+Global: --config <path>  (or QWEN3_EMBED_CONFIG)
 
 Models:
   embedding  ${cfg.modelId} at ${cfg.modelPath}
@@ -160,13 +160,13 @@ async function commandServe(cfg: EmbedConfig): Promise<void> {
     );
   }
   console.log(
-    `[gbrain-embed] listening on ${listenBase(cfg)} (mode ${service.currentMode}, ` +
+    `[qwen3-embed] listening on ${listenBase(cfg)} (mode ${service.currentMode}, ` +
       `embedding ${cfg.upstreamHost}:${cfg.upstreamPort}, ` +
       `reranker ${cfg.reranker.enabled ? `${cfg.upstreamHost}:${cfg.reranker.upstreamPort}` : "disabled"}, ` +
       `${cfg.dimensions}d)`,
   );
   const shutdown = async (): Promise<void> => {
-    console.log("[gbrain-embed] shutting down");
+    console.log("[qwen3-embed] shutting down");
     await service.stop();
     process.exit(0);
   };
@@ -206,7 +206,7 @@ async function commandStatus(cfg: EmbedConfig, args: string[]): Promise<void> {
     };
     if (json) printJson(body);
     else {
-      console.log(`gbrain-embed: not running (${listenBase(cfg)})`);
+      console.log(`qwen3-embed: not running (${listenBase(cfg)})`);
       console.log(`mode: ${body.mode}; embedding: ${cfg.modelId} (${cfg.dimensions}d)`);
       console.log(`reranker: ${body.reranker.enabled ? cfg.reranker.modelId : "disabled"}`);
     }
@@ -216,7 +216,7 @@ async function commandStatus(cfg: EmbedConfig, args: string[]): Promise<void> {
     printJson(health);
     return;
   }
-  console.log(`gbrain-embed: running on ${listenBase(cfg)} (mode ${health.mode})`);
+  console.log(`qwen3-embed: running on ${listenBase(cfg)} (mode ${health.mode})`);
   console.log(
     `embedding: ${health.upstream.state}${health.upstream.pid ? ` pid ${health.upstream.pid}` : ""}; ` +
       `ttl ${Math.round(health.idleTtlMs / 1000)}s; rss ${humanBytes(health.rssBytes)}`,
@@ -241,7 +241,7 @@ async function commandStatus(cfg: EmbedConfig, args: string[]): Promise<void> {
 
 async function commandMode(cfg: EmbedConfig, args: string[]): Promise<void> {
   const mode = args.find((arg) => arg === "background" || arg === "throughput");
-  if (!mode) throw new Error("usage: gbrain-embed mode <background|throughput>");
+  if (!mode) throw new Error("usage: qwen3-embed mode <background|throughput>");
   writeMode(cfg, mode);
   const json = has(args, "--json");
   try {
@@ -272,7 +272,7 @@ async function commandModelInstall(cfg: EmbedConfig, args: string[]): Promise<vo
   const source = flag(args, "--source");
   if (source && target === "all") {
     throw new Error(
-      "pick one model for --source: gbrain-embed model install <embedding|reranker> --source ...",
+      "pick one model for --source: qwen3-embed model install <embedding|reranker> --source ...",
     );
   }
   const keys: ModelKey[] = target === "all" ? MODEL_KEYS : [target as ModelKey];
@@ -346,7 +346,7 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
       }
       const combined = enabled.out + enabled.err;
       const hint = /pglite_busy|already open through|writer lock/i.test(combined)
-        ? "\nHint: stop the running `gbrain serve`, re-run `gbrain-embed setup`, then start it again."
+        ? "\nHint: stop the running `gbrain serve`, re-run `qwen3-embed setup`, then start it again."
         : "";
       throw new Error(`gbrain embeddings enable exited with ${enabled.code}${hint}`);
     }
@@ -554,7 +554,7 @@ async function commandBench(cfg: EmbedConfig, args: string[]): Promise<void> {
   }
   const health = await fetchHealth(cfg);
   if (!health) {
-    throw new Error(`the proxy is not running; start it with \`gbrain-embed serve\` or activate the launchd agent`);
+    throw new Error(`the proxy is not running; start it with \`qwen3-embed serve\` or activate the launchd agent`);
   }
 
   const count = Number(flag(args, "--texts") ?? 32);
@@ -603,13 +603,13 @@ async function commandRestart(cfg: EmbedConfig, args: string[]): Promise<void> {
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const result = Bun.spawnSync({
-    cmd: ["launchctl", "kickstart", "-k", `gui/${uid}/name.fmu.gbrain-embed`],
+    cmd: ["launchctl", "kickstart", "-k", `gui/${uid}/name.fmu.qwen3-embed`],
     stdout: "pipe",
     stderr: "pipe",
   });
   if (result.exitCode === 0) {
-    if (has(args, "--json")) printJson({ restarted: "launchd", label: "name.fmu.gbrain-embed", model: requested });
-    else console.log(`restarted name.fmu.gbrain-embed (${requested})`);
+    if (has(args, "--json")) printJson({ restarted: "launchd", label: "name.fmu.qwen3-embed", model: requested });
+    else console.log(`restarted name.fmu.qwen3-embed (${requested})`);
     return;
   }
   try {
@@ -621,7 +621,7 @@ async function commandRestart(cfg: EmbedConfig, args: string[]): Promise<void> {
     } else {
       await unload(cfg, requested);
     }
-    if (has(args, "--json")) printJson({ restarted: "proxy", label: "name.fmu.gbrain-embed", model: requested });
+    if (has(args, "--json")) printJson({ restarted: "proxy", label: "name.fmu.qwen3-embed", model: requested });
     else console.log(`asked the running proxy to drop its ${requested} child`);
   } catch (error) {
     throw new Error(
@@ -633,7 +633,7 @@ async function commandRestart(cfg: EmbedConfig, args: string[]): Promise<void> {
 
 async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
-  if (parsed.config) process.env.GBRAIN_EMBED_CONFIG = parsed.config;
+  if (parsed.config) process.env.QWEN3_EMBED_CONFIG = parsed.config;
   const cfg = loadConfig();
   const { command, rest } = parsed;
 
@@ -653,7 +653,7 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "model": {
       const sub = rest[0];
-      if (sub !== "install") throw new Error("usage: gbrain-embed model install [embedding|reranker|all] [--refresh] [--source ...]");
+      if (sub !== "install") throw new Error("usage: qwen3-embed model install [embedding|reranker|all] [--refresh] [--source ...]");
       await commandModelInstall(cfg, rest.slice(1));
       return;
     }
@@ -667,13 +667,13 @@ async function main(argv: string[]): Promise<void> {
       await commandRestart(cfg, rest);
       return;
     default:
-      throw new Error(`unknown command ${command}; run gbrain-embed --help`);
+      throw new Error(`unknown command ${command}; run qwen3-embed --help`);
   }
 }
 
 if (import.meta.main) {
   main(process.argv.slice(2)).catch((error) => {
-    console.error(`gbrain-embed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`qwen3-embed: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   });
 }

@@ -24,7 +24,7 @@ import {
 const temps: string[] = [];
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "gbrain-embed-model-"));
+  const dir = mkdtempSync(join(tmpdir(), "qwen3-embed-model-"));
   temps.push(dir);
   return dir;
 }

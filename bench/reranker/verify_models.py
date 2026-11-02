@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inspect_gguf import parse  # noqa: E402
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 MODELS = os.path.join(ROOT, "models")
 CAND = os.path.join(ROOT, "candidates")
 

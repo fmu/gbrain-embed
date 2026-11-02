@@ -4,7 +4,7 @@ start, warm latency and RSS for one candidate GGUF.
 
 Usage: python3 run_bench.py --key q8_0 --path /path/model.gguf \
          --size-bytes N --sha256 HEX --head-info "..."
-Writes /tmp/gbrain-rerank-bench/results/<key>.json
+Writes /tmp/qwen3-rerank-bench/results/<key>.json
 """
 import argparse
 import json
@@ -14,7 +14,7 @@ import time
 
 import bench_lib as B
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 RES = os.path.join(ROOT, "results")
 SANITY_QUERY = "What is the capital of France?"
 SANITY_DOCS = [

@@ -7,7 +7,7 @@ classifier head (`cls.output.weight`) is absent the relevance scores are
 meaningless by construction.
 
 Usage: python3 probe_broken_head.py --path <model.gguf> --key <name>
-Writes /tmp/gbrain-rerank-bench/results/<key>.broken_probe.json
+Writes /tmp/qwen3-rerank-bench/results/<key>.broken_probe.json
 """
 import argparse
 import json
@@ -17,7 +17,7 @@ import urllib.error
 
 import bench_lib as B
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 RES = os.path.join(ROOT, "results")
 SANITY_QUERY = "What is the capital of France?"
 SANITY_DOCS = [

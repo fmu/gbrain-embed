@@ -1,5 +1,5 @@
 /**
- * The loopback OpenAI-compatible endpoint gbrain talks to.
+ * The loopback OpenAI-compatible endpoint clients talk to.
  *
  * It fronts two managed `llama-server` children and owns the lifecycle gbrain's
  * `llama-server` recipes cannot: start each server on the first request that
@@ -312,7 +312,7 @@ export class EmbedService {
             id: this.cfg.modelId,
             object: "model",
             created: 0,
-            owned_by: "gbrain-embed",
+            owned_by: "qwen3-embed",
           },
         ];
         if (this.cfg.reranker.enabled) {
@@ -320,7 +320,7 @@ export class EmbedService {
             id: this.cfg.reranker.modelId,
             object: "model",
             created: 0,
-            owned_by: "gbrain-embed",
+            owned_by: "qwen3-embed",
           });
         }
         return json({ object: "list", data });

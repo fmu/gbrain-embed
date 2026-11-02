@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Compute ranking-quality metrics for every candidate from results/<key>.json,
-Q8_0 agreement metrics, and write /tmp/gbrain-rerank-bench/report.json.
+Q8_0 agreement metrics, and write /tmp/qwen3-rerank-bench/report.json.
 
 Also builds the comparison tables consumed by make_report_md.py.
 """
@@ -9,7 +9,7 @@ import math
 import os
 import statistics
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 RES = os.path.join(ROOT, "results")
 REF_KEY = "q8_0"
 

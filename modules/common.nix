@@ -1,13 +1,13 @@
 # Options shared by the NixOS and nix-darwin modules.
 #
-# Both modules run the same `gbrain-embed serve` process; only the service
+# Both modules run the same `qwen3-embed serve` process; only the service
 # manager and the defaults for writable state differ. The configuration is
 # rendered to one JSON file (`configFile`) which is passed to the CLI with
 # `--config` so the declarative options are the single source of truth.
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.gbrain-embed;
+  cfg = config.services.qwen3-embed;
 
   # The reranker child has its own port, idle TTL and launch flags; it is not
   # part of the embedding `mode` profiles. `null` means "omit it and let the
@@ -43,14 +43,14 @@ let
   effectiveConfig = lib.recursiveUpdate (lib.filterAttrs (_: value: value != null) baseConfig) cfg.settings;
 in
 {
-  options.services.gbrain-embed = {
-    enable = lib.mkEnableOption "the gbrain-embed on-demand embedding and reranking proxy";
+  options.services.qwen3-embed = {
+    enable = lib.mkEnableOption "the qwen3-embed on-demand embedding and reranking proxy";
 
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ../package.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ../package.nix { }";
-      description = "The gbrain-embed package to run.";
+      description = "The qwen3-embed package to run.";
     };
 
     installPackage = lib.mkOption {
@@ -121,7 +121,7 @@ in
       default = null;
       description = ''
         Path of the Qwen3-Reranker GGUF. When null, the CLI default is used
-        (`$HOME/.local/share/gbrain-embed/models/…`; NixOS overrides this).
+        (`$HOME/.local/share/qwen3-embed/models/…`; NixOS overrides this).
       '';
     };
 
@@ -181,7 +181,7 @@ in
       default = null;
       description = ''
         Path of the Qwen3-Embedding GGUF (the embedding model). When null, the CLI default is used
-        (`$HOME/.local/share/gbrain-embed/models/…`; NixOS overrides this).
+        (`$HOME/.local/share/qwen3-embed/models/…`; NixOS overrides this).
       '';
     };
 
@@ -209,7 +209,7 @@ in
       description = ''
         Directory for the mode marker, the two child PID records and their
         `llama-server` logs. When null, the CLI default is used
-        (`$HOME/.local/state/gbrain-embed`; NixOS overrides this).
+        (`$HOME/.local/state/qwen3-embed`; NixOS overrides this).
       '';
     };
 
@@ -231,13 +231,13 @@ in
 
     configFile = lib.mkOption {
       type = lib.types.path;
-      default = pkgs.writeText "gbrain-embed-config.json" (builtins.toJSON effectiveConfig);
+      default = pkgs.writeText "qwen3-embed-config.json" (builtins.toJSON effectiveConfig);
       defaultText = lib.literalExpression ''
-        pkgs.writeText "gbrain-embed-config.json" (builtins.toJSON …)
+        pkgs.writeText "qwen3-embed-config.json" (builtins.toJSON …)
       '';
       description = ''
         Rendered `config.json`, passed to the service with `--config`. It is
-        also what `gbrain-embed … --config` should point at when installing the
+        also what `qwen3-embed … --config` should point at when installing the
         model or running `setup`.
       '';
     };
@@ -249,19 +249,19 @@ in
     assertions = [
       {
         assertion = cfg.listenPort != cfg.upstreamPort;
-        message = "services.gbrain-embed: listenPort and upstreamPort must differ.";
+        message = "services.qwen3-embed: listenPort and upstreamPort must differ.";
       }
       {
         assertion = cfg.dimensions <= cfg.nativeDimensions;
-        message = "services.gbrain-embed: dimensions must not exceed nativeDimensions.";
+        message = "services.qwen3-embed: dimensions must not exceed nativeDimensions.";
       }
       {
         assertion = cfg.listenPort != cfg.rerankerUpstreamPort;
-        message = "services.gbrain-embed: listenPort and rerankerUpstreamPort must differ.";
+        message = "services.qwen3-embed: listenPort and rerankerUpstreamPort must differ.";
       }
       {
         assertion = cfg.upstreamPort != cfg.rerankerUpstreamPort;
-        message = "services.gbrain-embed: upstreamPort and rerankerUpstreamPort must differ.";
+        message = "services.qwen3-embed: upstreamPort and rerankerUpstreamPort must differ.";
       }
     ];
   };

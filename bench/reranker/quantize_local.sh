@@ -11,7 +11,7 @@
 # NOTE: quantizing from Q8_0 (not F16) adds a small extra quantization error on top
 # of the target type; this is documented in the report as a caveat.
 set -euo pipefail
-M=/tmp/gbrain-rerank-bench/models
+M=/tmp/qwen3-rerank-bench/models
 SRC="$M/qwen3-reranker-0.6b-q8_0.gguf"
 Q=/opt/homebrew/bin/llama-quantize
 

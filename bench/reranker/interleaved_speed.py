@@ -14,7 +14,7 @@ Per start: spawn→/health 200, one warm-up 10-doc request (discarded), then 5
 repetitions each for 1/10/30 documents, RSS sample, SIGTERM. Medians across
 rounds are reported as the primary speed comparison.
 
-Writes /tmp/gbrain-rerank-bench/results/speed_interleaved.json
+Writes /tmp/qwen3-rerank-bench/results/speed_interleaved.json
 """
 import json
 import os
@@ -23,16 +23,16 @@ import time
 
 import bench_lib as B
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 RES = os.path.join(ROOT, "results")
 REPS = 5
 ROUNDS = 2
 
 MODELS = [
-    ("q8_0", "/tmp/gbrain-rerank-bench/models/qwen3-reranker-0.6b-q8_0.gguf"),
-    ("q5_k_m", "/tmp/gbrain-rerank-bench/models/qwen3-reranker-0.6b-q8_0-requant-Q5_K_M.gguf"),
-    ("q4_k_m", "/tmp/gbrain-rerank-bench/models/qwen3-reranker-0.6b-q8_0-requant-Q4_K_M.gguf"),
-    ("q6_k", "/tmp/gbrain-rerank-bench/models/qwen3-reranker-0.6b-q8_0-requant-Q6_K.gguf"),
+    ("q8_0", "/tmp/qwen3-rerank-bench/models/qwen3-reranker-0.6b-q8_0.gguf"),
+    ("q5_k_m", "/tmp/qwen3-rerank-bench/models/qwen3-reranker-0.6b-q8_0-requant-Q5_K_M.gguf"),
+    ("q4_k_m", "/tmp/qwen3-rerank-bench/models/qwen3-reranker-0.6b-q8_0-requant-Q4_K_M.gguf"),
+    ("q6_k", "/tmp/qwen3-rerank-bench/models/qwen3-reranker-0.6b-q8_0-requant-Q6_K.gguf"),
 ]
 ORDERS = [
     ["q8_0", "q5_k_m", "q4_k_m", "q6_k"],

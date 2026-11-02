@@ -2,7 +2,7 @@
 """Run one candidate model over a supplementary evaluation set and save raw scores.
 
 Usage: python3 run_quality_extra.py --key q8_0 --path <gguf> --eval-set hard
-Writes /tmp/gbrain-rerank-bench/results/<key>.<eval-set>.json
+Writes /tmp/qwen3-rerank-bench/results/<key>.<eval-set>.json
 """
 import argparse
 import json
@@ -12,7 +12,7 @@ import time
 
 import bench_lib as B
 
-ROOT = "/tmp/gbrain-rerank-bench"
+ROOT = "/tmp/qwen3-rerank-bench"
 RES = os.path.join(ROOT, "results")
 
 
