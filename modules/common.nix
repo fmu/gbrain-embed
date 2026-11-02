@@ -100,8 +100,9 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        Serve the reranker (`POST /v1/rerank`) and configure gbrain to use it.
-        When false the proxy only carries embeddings.
+        Serve the reranker (`POST /v1/rerank`). `setup-gbrain` then also
+        configures gbrain to use it. When false the proxy only carries
+        embeddings.
       '';
     };
 
@@ -170,9 +171,9 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Path to the `gbrain` CLI. Only needed by the commands that shell out to
-        gbrain (`setup`, `model`), not by `serve`. When null, the CLI resolves
-        `gbrain` from `PATH`.
+        Path to the `gbrain` CLI. Only needed by `setup-gbrain`, which shells
+        out to gbrain; `serve` and `setup` never use it. When null, the CLI
+        resolves `gbrain` from `PATH`.
       '';
     };
 
@@ -237,8 +238,8 @@ in
       '';
       description = ''
         Rendered `config.json`, passed to the service with `--config`. It is
-        also what `qwen3-embed … --config` should point at when installing the
-        model or running `setup`.
+        also what `qwen3-embed … --config` should point at when running
+        `setup` (models) or `setup-gbrain` (the gbrain integration).
       '';
     };
   };

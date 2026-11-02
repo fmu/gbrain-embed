@@ -33,7 +33,7 @@ export interface ModeProfile {
  * idle TTL. Switching embedding modes never stops the reranker.
  */
 export interface RerankerConfig {
-  /** Serve `/v1/rerank`; when false the route answers 503 and setup leaves gbrain alone. */
+  /** Serve `/v1/rerank`; when false the route answers 503 and `setup-gbrain` leaves gbrain alone. */
   enabled: boolean;
   modelPath: string;
   modelId: string;
@@ -53,6 +53,7 @@ export interface EmbedConfig {
   /** Port of the managed embedding `llama-server`. */
   upstreamPort: number;
   llamaServer: string;
+  /** Only `setup-gbrain` uses this; the service never shells out to gbrain. */
   gbrainBin: string;
   modelPath: string;
   modelId: string;

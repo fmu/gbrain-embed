@@ -58,8 +58,9 @@ in
       isSystemUser = true;
       group = cfg.group;
       home = cfg.dataDir;
-      # The human operator runs `qwen3-embed setup` against this config, and
-      # that command reads (never rewrites) the model file.
+      # The human operator runs `qwen3-embed setup` (models) and
+      # `setup-gbrain` (gbrain integration) against this config; both only read
+      # the model file.
       homeMode = "0755";
       createHome = true;
       description = "qwen3-embed service user";

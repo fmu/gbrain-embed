@@ -4,7 +4,10 @@
  *
  * The launchd agent runs `serve`; everything else is operator-facing. The CLI
  * is deliberately dependency-free beyond Bun and the Homebrew llama.cpp build.
+ * Only `setup-gbrain` shells out to gbrain; the service itself has no gbrain
+ * dependency.
  */
+import { existsSync } from "node:fs";
 import { loadConfig, listenBase, type EmbedConfig, type Mode } from "./config.ts";
 import { installModel, modelDescriptors, type ModelKey } from "./model.ts";
 import { EmbedService, readMode, writeMode, type UnloadTarget } from "./service.ts";
@@ -53,7 +56,8 @@ Usage:
                                          Switch the embedding resource profile
   qwen3-embed model install [embedding|reranker|all] [--refresh] [--source <ollama:tag|hf:repo/file|path>] [--json]
                                          Hardlink/download the verified GGUFs
-  qwen3-embed setup [--json]            Install the models, configure gbrain, backfill
+  qwen3-embed setup [--json]            Install and verify the model GGUFs
+  qwen3-embed setup-gbrain [--json]     Point gbrain at this endpoint (embeddings + reranker) and backfill
   qwen3-embed bench [--model <embedding|reranker|all>] [--mode <m>] [--texts N] [--json]
                                          Measure cold start, warm throughput and RSS
   qwen3-embed restart [--model <embedding|reranker|all>] [--json]
@@ -298,13 +302,53 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
   const rerankerModel = cfg.reranker.enabled
     ? await installModel(cfg, "reranker", {})
     : null;
-  if (!json) {
-    console.log(`embedding model ready: ${models.path}`);
-    console.log(`  sha256: ${models.sha256}`);
-    if (rerankerModel) {
-      console.log(`reranker model ready: ${rerankerModel.path}`);
-      console.log(`  sha256: ${rerankerModel.sha256}`);
-    }
+
+  const summary = {
+    status: "models-ready",
+    model: cfg.modelId,
+    dimensions: cfg.dimensions,
+    modelPath: models.path,
+    sha256: models.sha256,
+    listen: `${listenBase(cfg)}/v1`,
+    mode: readMode(cfg),
+    reranker: cfg.reranker.enabled
+      ? {
+          enabled: true,
+          model: cfg.reranker.modelId,
+          modelPath: rerankerModel?.path ?? cfg.reranker.modelPath,
+          sha256: rerankerModel?.sha256 ?? null,
+          listen: `${listenBase(cfg)}/v1`,
+        }
+      : { enabled: false },
+  };
+  if (json) {
+    printJson(summary);
+    return;
+  }
+  console.log(`embedding model ready: ${models.path}`);
+  console.log(`  sha256: ${models.sha256}`);
+  if (rerankerModel) {
+    console.log(`reranker model ready: ${rerankerModel.path}`);
+    console.log(`  sha256: ${rerankerModel.sha256}`);
+  }
+  console.log(`endpoint: ${listenBase(cfg)}/v1; mode: ${summary.mode}`);
+  console.log("gbrain is untouched; run `qwen3-embed setup-gbrain` for the integration.");
+}
+
+/**
+ * The optional gbrain integration. Kept out of `setup` so that installing and
+ * serving embeddings never requires gbrain; only this command shells out to it.
+ */
+async function commandSetupGbrain(cfg: EmbedConfig, args: string[]): Promise<void> {
+  const json = has(args, "--json");
+  const missing = [cfg.modelPath, cfg.reranker.enabled ? cfg.reranker.modelPath : null]
+    .filter((path): path is string => path !== null)
+    .filter((path) => !existsSync(path));
+  if (missing.length > 0) {
+    throw new Error(
+      `models are not installed (${missing.join(", ")}); run \`qwen3-embed setup\` or ` +
+        "`qwen3-embed model install` first",
+    );
   }
 
   let temporary: EmbedService | null = null;
@@ -314,7 +358,7 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
     temporary.start();
     health = await fetchHealth(cfg);
     if (!health) throw new Error("started the embedding proxy but /health did not answer");
-    if (!json) console.log(`proxy started for setup on ${listenBase(cfg)}`);
+    if (!json) console.log(`proxy started for setup-gbrain on ${listenBase(cfg)}`);
   }
 
   try {
@@ -346,7 +390,7 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
       }
       const combined = enabled.out + enabled.err;
       const hint = /pglite_busy|already open through|writer lock/i.test(combined)
-        ? "\nHint: stop the running `gbrain serve`, re-run `qwen3-embed setup`, then start it again."
+        ? "\nHint: stop the running `gbrain serve`, re-run `qwen3-embed setup-gbrain`, then start it again."
         : "";
       throw new Error(`gbrain embeddings enable exited with ${enabled.code}${hint}`);
     }
@@ -369,19 +413,15 @@ async function commandSetup(cfg: EmbedConfig, args: string[]): Promise<void> {
     mustGbrain(cfg, ["doctor", "--only", "embeddings", "--json"], json);
 
     const summary = {
-      status: "enabled",
+      status: "gbrain-configured",
       model: `llama-server:${cfg.modelId}`,
       dimensions: cfg.dimensions,
-      modelPath: models.path,
-      sha256: models.sha256,
       listen: `${listenBase(cfg)}/v1`,
       mode: readMode(cfg),
       reranker: cfg.reranker.enabled
         ? {
             enabled: true,
             model: `llama-server-reranker:${cfg.reranker.modelId}`,
-            modelPath: rerankerModel?.path ?? cfg.reranker.modelPath,
-            sha256: rerankerModel?.sha256 ?? null,
             listen: `${listenBase(cfg)}/v1`,
           }
         : { enabled: false },
@@ -659,6 +699,9 @@ async function main(argv: string[]): Promise<void> {
     }
     case "setup":
       await commandSetup(cfg, rest);
+      return;
+    case "setup-gbrain":
+      await commandSetupGbrain(cfg, rest);
       return;
     case "bench":
       await commandBench(cfg, rest);
